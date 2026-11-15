@@ -1,7 +1,5 @@
 # Imla
 
-> 🎥 **Video Walkthrough & Explanation:** [Watch on YouTube](https://youtu.be/nHz_IqXA1CU)
-
 A fast, cross-platform push-to-talk voice dictation desktop app with local speech recognition, live streaming preview, and 3-tier transcript cleanup.
 
 Hold **Right Option / Right Alt** to speak, and release to automatically transcribe, clean up, and paste the text at your active cursor without stealing window focus.
@@ -191,7 +189,7 @@ Settings are persisted atomically to `~/.config/imla/config.json` across all pla
     "ollama_model": "llama3.2:3b"
   },
   "dictionary": [
-    ["kubernetes", "K8s"],
+    ["kubernetes", "K8S"],
     ["pie torch", "PyTorch"],
     ["next js", "Next.js"],
     ["grpc", "gRPC"]
@@ -224,7 +222,7 @@ uv run python tests/hud_smoke.py
 
 - `imla/main.py` — Application entrypoint, state orchestration, live config watcher, and CLI.
 - `imla/audio.py` — Resilient PortAudio capture, stereo-to-mono downmix, 16 kHz polyphase resampling, silence detection, and automatic fallback mic switching.
-- `imla/preview.py` — Asynchronous `Vosk` streaming recognizer with bounded frame queue (`maxsize=8`), rate-limited callbacks (`<=15 Hz`), and automatic model download/caching.
+- `imla/preview.py` — Asynchronous `Vosk` streaming recogniser with bounded frame queue (`maxsize=8`), rate-limited callbacks (`<=15 Hz`), and automatic model download/caching.
 - `imla/transcribe.py` — Lazy-loaded, hot-swappable `faster-whisper` (`int8` CPU) transcription wrapper.
 - `imla/format.py` — 3-tier transcript cleanup (`Groq` → `Ollama` → offline `Rule` engine) with `1.5x` word-count hallucination guard.
 - `imla/dictionary.py` — Case-insensitive regex word-boundary personal dictionary replacements.
@@ -235,4 +233,4 @@ uv run python tests/hud_smoke.py
 - `imla/settings.py` — Four-tab `Tkinter` Settings dashboard with dirty tracking, close guard, and Vosk model downloader.
 - `imla/keychain.py` — OS keychain wrapper (`keyring` + `.env` fallback) and Groq API connection tester.
 - `imla/startup.py` — Launch-on-login manager (`LaunchAgent` plist on macOS, `Run` registry key on Windows, XDG `.desktop` entry on Linux).
-- `imla/config.py` — Atomic config loader/saver with key-stripping defense-in-depth.
+- `imla/config.py` — Atomic config loader/saver with key-stripping defence-in-depth.
