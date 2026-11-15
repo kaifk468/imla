@@ -1,0 +1,212 @@
+# Java / Spring Boot terms, most important first (the Whisper hint only fits
+# the first few dozen; the cleanup prompt takes more). One term per line.
+Spring Boot
+Java
+JVM
+JPA
+Hibernate
+@RestController
+@Transactional
+@Autowired
+Maven
+JUnit
+Mockito
+Kafka
+Lombok
+Spring Data JPA
+Spring Security
+Spring Cloud
+@Service
+@Repository
+@Entity
+@Configuration
+@Bean
+@Component
+@RequestMapping
+@GetMapping
+@PostMapping
+@PathVariable
+@RequestBody
+@Valid
+application.yml
+application.properties
+pom.xml
+build.gradle
+Gradle
+JDK
+JRE
+JDBC
+JPQL
+DTO
+POJO
+NullPointerException
+IllegalArgumentException
+IllegalStateException
+RuntimeException
+ConcurrentHashMap
+HashMap
+ArrayList
+LinkedList
+CompletableFuture
+ExecutorService
+Optional
+Stream API
+Collectors
+lambda
+functional interface
+record
+sealed class
+virtual threads
+Project Loom
+try-with-resources
+varargs
+generics
+autoboxing
+garbage collection
+heap
+classpath
+bytecode
+@Override
+@FunctionalInterface
+@SpringBootApplication
+@EnableAutoConfiguration
+@ComponentScan
+@ConfigurationProperties
+@ControllerAdvice
+@ExceptionHandler
+@RequestParam
+@ResponseStatus
+@Qualifier
+@Primary
+@Value
+@Scheduled
+@EnableScheduling
+@Cacheable
+@EnableCaching
+@PreAuthorize
+@Slf4j
+@Getter
+@Setter
+@Builder
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@RequiredArgsConstructor
+@SpringBootTest
+@WebMvcTest
+@DataJpaTest
+@MockBean
+@SpyBean
+@Test
+@BeforeEach
+@AfterEach
+@ParameterizedTest
+@Mock
+@InjectMocks
+@Column
+@Id
+@GeneratedValue
+@OneToMany
+@ManyToOne
+@ManyToMany
+@JoinColumn
+@Query
+@Modifying
+@EnableFeignClients
+@FeignClient
+@KafkaListener
+@RabbitListener
+@Async
+@EnableAsync
+@Profile
+@ConditionalOnProperty
+dependency injection
+inversion of control
+IoC container
+ApplicationContext
+BeanFactory
+bean lifecycle
+auto-configuration
+starter dependency
+Spring Initializr
+Spring Actuator
+Spring WebFlux
+Project Reactor
+Mono
+Flux
+Spring MVC
+DispatcherServlet
+Spring AOP
+Spring Batch
+Spring Integration
+Spring Cloud Gateway
+Spring Data
+JpaRepository
+CrudRepository
+PagingAndSortingRepository
+EntityManager
+Specification
+Criteria API
+lazy loading
+N+1 problem
+HikariCP
+Flyway
+Liquibase
+Testcontainers
+WireMock
+AssertJ
+Hamcrest
+RestAssured
+Mockito
+MapStruct
+Jackson
+ObjectMapper
+Swagger
+OpenAPI
+springdoc
+Micrometer
+Prometheus
+Grafana
+Resilience4j
+circuit breaker
+Feign
+Eureka
+Consul
+Keycloak
+OAuth2
+JWT
+OpenID Connect
+RabbitMQ
+ActiveMQ
+Redis
+Elasticsearch
+MongoDB
+PostgreSQL
+MySQL
+Oracle
+Hibernate Envers
+Quarkus
+Micronaut
+Vert.x
+Jakarta EE
+Tomcat
+Jetty
+Undertow
+Netty
+Log4j
+Logback
+SLF4J
+SonarQube
+Checkstyle
+Jenkins
+GraalVM
+JVM heap
+thread pool
+deadlock
+synchronized
+volatile
+ReentrantLock
+AtomicInteger
+parallel stream
+Java 17
+Java 21

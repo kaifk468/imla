@@ -50,7 +50,12 @@ def default_config() -> Dict[str, Any]:
             "groq_model": "openai/gpt-oss-20b",
             "ollama_model": "llama3.2:3b",
             "fix_grammar": True,     # minimal-edit grammar correction (LLM tiers)
+            # Tell the cleanup LLM the speaker is a (Java/Spring Boot) engineer.
+            "developer_focus": True,
         },
+        # Built-in developer vocabulary packs (see imla/vocab/). The user's own
+        # vocabulary and dictionary always take priority over these.
+        "vocab_packs": {"java_spring": True, "software_general": True},
         # Terms that need correct spelling but no find/replace pair. They are
         # fed to Whisper and to the cleanup LLM as spelling hints.
         "vocabulary": [],
@@ -127,12 +132,20 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
 
 
 def get_vocabulary(cfg: Dict[str, Any]) -> List[str]:
-    """Return spelling-hint terms: the ``vocabulary`` list plus every
-    dictionary replacement target (e.g. ``PyTorch``). De-duplicated, in order."""
+    """Return spelling-hint terms, highest priority first: the user's own
+    ``vocabulary``, the Java/Spring pack, the user's dictionary targets, then
+    the other enabled packs. De-duplicated, in order."""
+    from . import vocabpacks
+
     terms: List[str] = []
     seen = set()
     candidates = [t for t in cfg.get("vocabulary", []) if isinstance(t, str)]
+    packs = vocabpacks.enabled_packs(cfg)
+    for name in packs[:1]:
+        candidates += list(vocabpacks.pack_terms(name))
     candidates += [replace for _, replace in get_dictionary(cfg)]
+    for name in packs[1:]:
+        candidates += list(vocabpacks.pack_terms(name))
     for term in candidates:
         term = term.strip()
         if term and term.lower() not in seen:
@@ -141,8 +154,22 @@ def get_vocabulary(cfg: Dict[str, Any]) -> List[str]:
     return terms
 
 
+def get_effective_dictionary(cfg: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """User dictionary first, then the enabled built-in pack replacements.
+
+    Use this for dictation; use :func:`get_dictionary` for the editable list
+    shown in Settings (so pack entries are never copied into config.json)."""
+    from . import vocabpacks
+
+    user = get_dictionary(cfg)
+    seen = {find.lower() for find, _ in user}
+    extra = [(f, r) for f, r in vocabpacks.enabled_replacements(cfg)
+             if f.lower() not in seen]
+    return user + extra
+
+
 def get_dictionary(cfg: Dict[str, Any]) -> List[Tuple[str, str]]:
-    """Return the dictionary as a list of ``(find, replace)`` tuples.
+    """Return the user's dictionary as a list of ``(find, replace)`` tuples.
 
     Invalid entries are silently dropped."""
     out: List[Tuple[str, str]] = []

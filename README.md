@@ -39,7 +39,13 @@ A notification **"Imla is ready"** appears after a few seconds and an icon shows
 - Search for **Imla Settings** the same way, **or** right-click the tray icon and choose **Settings…**.
 - Close the Settings window with the **X** (it asks if there are unsaved changes). This does *not* stop Imla.
 
-**4. Quit (one click):** right-click the Imla tray icon (on Windows it may be under the **^** arrow) and choose **Quit**. Starting Imla twice is safe: the second copy exits and the first keeps running.
+**4. Quit (one click), any of these:**
+- Right-click the Imla tray icon (on Windows it may be under the **^** arrow) and choose **Quit**.
+- **Any platform, even without a tray menu:** open Imla Settings and click **Quit Imla** (bottom left).
+- **Ubuntu:** search for **Quit Imla** (the Linux installer creates it), or run `pkill -f imla.main`. On some Ubuntu setups the tray icon has no menu and a click just opens Settings; use the options above.
+- Terminal: `uv run python -m imla.main --quit`.
+
+Starting Imla twice is safe: the second copy exits and the first keeps running.
 
 **Notes**
 - The launchers point at this project folder and its `.venv`; do not move or delete the folder (re-run the installer if you do).
@@ -64,6 +70,7 @@ A notification **"Imla is ready"** appears after a few seconds and an icon shows
   - **Live Provisional Preview (`Vosk`)**: Streams low-latency partial transcripts in the bottom half of the expanded HUD pill while you hold the hotkey (auto-downloaded and cached at `~/.cache/imla/models/vosk-model-small-en-us-0.15`).
   - **Final Transcription, engine `auto` (default)**: sends the recording to **Groq cloud Whisper (`whisper-large-v3-turbo`)** (about 0.5–1 s) and automatically **falls back to local `faster-whisper`** (CPU, `int8`) if there is no key, no network, a timeout or a rate limit. After repeated cloud failures the cloud is skipped for a few minutes so an outage adds no delay. Choose **Local only** in Settings → Transcription if you do not want audio to leave your computer. In `auto`/`cloud` mode your recorded audio and transcript text are sent to Groq.
   - **Technical vocabulary**: terms from Settings → **Vocabulary** and your dictionary are passed to Whisper and the cleanup model so words like `PyTorch`, `Kubernetes`, `gRPC` come out right.
+- **Built for software engineers, tuned for Java / Spring Boot**: ships with editable vocabulary packs in `imla/vocab/` (about 210 Java/Spring terms, 110 general software terms, and about 240 `spoken => Written` replacements). Examples: "at transactional" → `@Transactional`, "j p a repository" → `JpaRepository`, "null pointer exception" → `NullPointerException`, "pom dot xml" → `pom.xml`, "j unit" → `JUnit`, "eighty eighty" → `8080`. The cleanup model is told you are a Java/Spring Boot engineer so it keeps class names, annotations, packages and file names exactly. Turn packs on/off in **Settings → Vocabulary**; your own terms and dictionary always take priority. To add words, edit the `.txt` files in `imla/vocab/` (spelling hints one per line, replacements as `spoken => Written`) or use the Settings tabs.
 - **Grammar fixing** (Settings → Cleanup → *Fix grammar mistakes*): the cleanup model corrects grammar and tense while a retention guard prevents it from dropping or rewriting your words.
 - **Free-tier protection**: cleanup rotates `openai/gpt-oss-20b` → `gpt-oss-120b` → `qwen/qwen3.8-27b` on rate limits, and **Settings → Cleanup → Usage today** shows tokens and audio seconds used against the daily Groq limits.
 - **3-Tier Transcript Cleanup**:
@@ -194,6 +201,9 @@ uv run python -m imla.main --list-devices
 # Lock recording to a specific microphone (by device index or name substring)
 uv run python -m imla.main --device 0
 uv run python -m imla.main --device "MacBook Pro Microphone"
+
+# Ask the running Imla to quit (also used by the "Quit Imla" launcher/button)
+uv run python -m imla.main --quit
 
 # Open the Settings dashboard standalone
 uv run python -m imla.main --settings

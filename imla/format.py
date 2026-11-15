@@ -97,7 +97,7 @@ accidental word repeats ("the the"). Keep words like "like", "actually", \
 7. NEVER delete, replace or paraphrase content words, technical terms, product \
 names, code identifiers, acronyms or numbers. Use their standard spelling and \
 casing (e.g. PyTorch, Kubernetes, GitHub, gRPC, JSON, API).
-{grammar_rule}
+{grammar_rule}{developer_rule}
 Few-shot examples:
 - Input: "Hi let's meet on Wednesday period No let's meet on Friday at 5:00 p.m. period No let's meet on Monday at 2:00 p.m. period"
   Output: Hi, let's meet on Monday at 2:00 p.m.
@@ -115,7 +115,7 @@ Few-shot examples:
   Output: Send a message to John, tell him the meeting is at three.
 - Input: "deploy the pie torch model to kubernetes using grpc"
   Output: Deploy the PyTorch model to Kubernetes using gRPC.
-{grammar_examples}{vocab_block}
+{grammar_examples}{developer_examples}{vocab_block}
 Return ONLY the cleaned transcript. No preamble, no labels, no commentary, \
 no explanation."""
 
@@ -133,9 +133,29 @@ _GRAMMAR_EXAMPLES = """\
 """
 
 
+_DEVELOPER_RULE = """\
+9. The speaker is a software engineer, mostly Java and Spring Boot. Treat \
+technical words as code, never as everyday words: keep class names in PascalCase \
+(CompletableFuture), methods and fields in camelCase, annotations with their @ \
+(@Transactional, @RestController), exceptions (NullPointerException), package \
+names (com.example.service), file names (pom.xml, application.yml), Maven \
+coordinates, CLI commands and flags exactly as spoken. Words like "bean", \
+"stream", "record", "lambda", "thread", "heap" and "pool" are Java terms here. \
+Never "correct" a technical term into a common word.
+"""
+
+_DEVELOPER_EXAMPLES = """\
+- Input: "inject the user repository with at autowired into the order service and mark the method at transactional"
+  Output: Inject the user repository with @Autowired into the order service and mark the method @Transactional.
+- Input: "the spring boot app throws a null pointer exception when the j p a repository returns an empty optional"
+  Output: The Spring Boot app throws a NullPointerException when the JpaRepository returns an empty Optional.
+"""
+
+
 def build_system_prompt(
     vocabulary: Optional[Iterable[str]] = None,
     fix_grammar: bool = True,
+    developer_focus: bool = True,
 ) -> str:
     """Assemble the cleanup system prompt.
 
@@ -158,6 +178,8 @@ def build_system_prompt(
     return SYSTEM_PROMPT.format(
         grammar_rule=_GRAMMAR_RULE if fix_grammar else "",
         grammar_examples=_GRAMMAR_EXAMPLES if fix_grammar else "",
+        developer_rule=_DEVELOPER_RULE if developer_focus else "",
+        developer_examples=_DEVELOPER_EXAMPLES if developer_focus else "",
         vocab_block=vocab_block,
     )
 
@@ -185,6 +207,7 @@ def log_format_setup(
     fmt_cfg: Optional[dict] = None,
     has_groq_key: bool = False,
     vocabulary: Optional[Iterable[str]] = None,
+    developer_focus: bool = True,
 ) -> None:
     """Log which cleanup models are active and the prompt they receive."""
     fmt_cfg = fmt_cfg or {}
@@ -206,9 +229,10 @@ def log_format_setup(
     log.info("Groq model fallback chain (on 429/5xx): %s", " -> ".join(chain))
     fix_grammar = bool(fmt_cfg.get("fix_grammar", True))
     log.info("Grammar correction: %s", "ON" if fix_grammar else "OFF")
+    log.info("Developer (Java/Spring Boot) focus: %s", "ON" if developer_focus else "OFF")
     log.info(
         "Cleanup system prompt:\n%s",
-        build_system_prompt(vocabulary, fix_grammar),
+        build_system_prompt(vocabulary, fix_grammar, developer_focus),
     )
 
 
@@ -228,6 +252,7 @@ def clean_transcript(
     vocabulary: Optional[Iterable[str]] = None,
     fix_grammar: bool = True,
     skip_llm_for_short: bool = True,
+    developer_focus: bool = True,
 ) -> FormatResult:
     """Clean a raw transcript using the 3-tier failover pipeline.
 
@@ -241,6 +266,7 @@ def clean_transcript(
         dictionary: iterable of ``(find, replace)`` tuples applied
             before the LLM (so it sees correct terms) and again after.
         vocabulary: technical terms the LLM must spell exactly.
+        developer_focus: tell the LLM the speaker is a Java/Spring Boot engineer.
         fix_grammar: ask the LLM tiers for minimal-edit grammar fixes.
             (The regex tier cannot fix grammar.)
         skip_llm_for_short: in auto mode, skip the LLM for short (<= 6 words)
@@ -255,7 +281,7 @@ def clean_transcript(
         raw = apply_dictionary(raw, compiled)
 
     raw_words = _word_count(raw)
-    system_prompt = build_system_prompt(vocabulary, fix_grammar)
+    system_prompt = build_system_prompt(vocabulary, fix_grammar, developer_focus)
     tier_used, text, latency_s = _run_tier(
         raw,
         groq_api_key=groq_api_key,

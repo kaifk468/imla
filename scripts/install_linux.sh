@@ -26,8 +26,9 @@ for a in "$@"; do
 done
 
 if [ "$UNINSTALL" = 1 ]; then
-  rm -f "$APPS/imla.desktop" "$APPS/imla-settings.desktop" \
+  rm -f "$APPS/imla.desktop" "$APPS/imla-settings.desktop" "$APPS/imla-quit.desktop" \
         "$DESKTOP_DIR/Imla.desktop" "$DESKTOP_DIR/Imla Settings.desktop" \
+        "$DESKTOP_DIR/Quit Imla.desktop" \
         "$AUTOSTART/imla.desktop"
   echo "Removed Imla launchers."
   exit 0
@@ -75,12 +76,14 @@ EOF
 mkdir -p "$APPS"
 write_entry "$APPS/imla.desktop" "Imla" ""
 write_entry "$APPS/imla-settings.desktop" "Imla Settings" "--settings"
+write_entry "$APPS/imla-quit.desktop" "Quit Imla" "--quit"
 
 if [ "$WITH_DESKTOP" = 1 ] && [ -d "$DESKTOP_DIR" ]; then
   write_entry "$DESKTOP_DIR/Imla.desktop" "Imla" ""
   write_entry "$DESKTOP_DIR/Imla Settings.desktop" "Imla Settings" "--settings"
+  write_entry "$DESKTOP_DIR/Quit Imla.desktop" "Quit Imla" "--quit"
   # Ubuntu shows "Allow Launching" until the file is marked trusted.
-  for f in "$DESKTOP_DIR/Imla.desktop" "$DESKTOP_DIR/Imla Settings.desktop"; do
+  for f in "$DESKTOP_DIR/Imla.desktop" "$DESKTOP_DIR/Imla Settings.desktop" "$DESKTOP_DIR/Quit Imla.desktop"; do
     gio set "$f" metadata::trusted true 2>/dev/null || true
   done
 fi
@@ -93,7 +96,9 @@ fi
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPS" 2>/dev/null || true
 
 echo
-echo "Done. Press Super and type 'Imla' to start it."
+echo "Done. Press Super and type 'Imla' to start it, 'Quit Imla' to stop it."
+echo "You can also quit from Imla Settings (the 'Quit Imla' button, bottom left)."
+echo "Last resort without a tray menu: pkill -f imla.main"
 echo "If a Desktop icon says 'Allow Launching', right-click it and choose that once."
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
   echo

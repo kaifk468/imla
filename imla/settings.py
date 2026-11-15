@@ -53,6 +53,7 @@ from .config import (
     load_config,
     save_config,
 )
+from . import vocabpacks
 from .keychain import get_api_key, set_api_key, test_connection as groq_test
 
 log = logging.getLogger("imla.settings")
@@ -87,6 +88,11 @@ FREE_TIER_NOTE = (
     "Groq free tier: about 200K tokens/day per cleanup model and "
     "8 hours/day of cloud Whisper audio."
 )
+PACKS_HELP = (
+    "Editable word lists live in the imla/vocab folder (spelling hints and "
+    "'spoken => Written' replacements, e.g. 'at transactional' => @Transactional)."
+)
+
 VOCAB_HELP = (
     "Technical terms, names and acronyms. Helps speech recognition and "
     "cleanup spell them correctly."
@@ -124,6 +130,11 @@ def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         tr.setdefault(k, d["transcription"][k])
     fmt = cfg.setdefault("format", {})
     fmt.setdefault("fix_grammar", d["format"]["fix_grammar"])
+    fmt.setdefault("developer_focus", d["format"]["developer_focus"])
+    packs = cfg.get("vocab_packs") if isinstance(cfg.get("vocab_packs"), dict) else {}
+    cfg["vocab_packs"] = {
+        n: bool(packs.get(n, True)) for n in d["vocab_packs"]
+    }
     cfg.setdefault("tail_ms", d["tail_ms"])
     vocab = cfg.get("vocabulary")
     cfg["vocabulary"] = parse_vocabulary(
@@ -215,6 +226,10 @@ class SettingsWindow:
         self._beam_var = tk.StringVar(master=root)
         self._threads_var = tk.StringVar(master=root)
         self._fix_grammar_var = tk.BooleanVar(master=root)
+        self._dev_focus_var = tk.BooleanVar(master=root)
+        self._pack_vars = {
+            name: tk.BooleanVar(master=root) for name in vocabpacks.PACK_ORDER
+        }
         self._tail_var = tk.StringVar(master=root)
         self._cloud_status_var = tk.StringVar(master=root, value="")
         self._groq_status_var = tk.StringVar(master=root, value="")
@@ -546,22 +561,38 @@ class SettingsWindow:
         frame = ttk.Frame(notebook, padding=12)
         notebook.add(frame, text="Vocabulary")
 
+        packs = ttk.LabelFrame(frame, text="Built-in developer vocabulary", padding=8)
+        packs.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 10))
+        for name in vocabpacks.PACK_ORDER:
+            ttk.Checkbutton(
+                packs, text=vocabpacks.PACK_LABELS.get(name, name),
+                variable=self._pack_vars[name], command=self._mark_dirty,
+            ).pack(anchor="w")
+        ttk.Checkbutton(
+            packs, text="Tell the cleanup model I am a Java / Spring Boot engineer",
+            variable=self._dev_focus_var, command=self._mark_dirty,
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            packs, text=PACKS_HELP, foreground="#555", wraplength=520, justify="left",
+        ).pack(anchor="w", pady=(6, 0))
+
         ttk.Label(
             frame, text=VOCAB_HELP, foreground="#555", wraplength=540, justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
         ttk.Label(
-            frame, text="One term per line.", foreground="#555",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            frame, text="Your own terms, one per line (these always win).",
+            foreground="#555",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
-        self._vocab_text = tk.Text(frame, height=14, width=50, wrap="none", undo=True)
-        self._vocab_text.grid(row=2, column=0, sticky="nsew")
+        self._vocab_text = tk.Text(frame, height=10, width=50, wrap="none", undo=True)
+        self._vocab_text.grid(row=3, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=self._vocab_text.yview)
-        scroll.grid(row=2, column=1, sticky="ns")
+        scroll.grid(row=3, column=1, sticky="ns")
         self._vocab_text.configure(yscrollcommand=scroll.set)
         self._vocab_text.bind("<KeyRelease>", lambda e: self._mark_dirty())
         self._vocab_text.bind("<<Modified>>", self._on_vocab_modified)
 
-        frame.rowconfigure(2, weight=1)
+        frame.rowconfigure(3, weight=1)
         frame.columnconfigure(0, weight=1)
 
     def _on_vocab_modified(self, _event=None) -> None:
@@ -643,6 +674,10 @@ class SettingsWindow:
         footer = ttk.Frame(root, padding=(12, 8))
         footer.pack(fill="x", side="bottom")
 
+        ttk.Button(
+            footer, text="Quit Imla", command=self._quit_imla, width=10,
+        ).pack(side="left", padx=(0, 12))
+
         stats = self._working.get("stats", {})
         dicts = stats.get("total_dictations", 0)
         words = stats.get("total_words", 0)
@@ -710,6 +745,10 @@ class SettingsWindow:
         self._groq_model_var.set(fmt.get("groq_model", "openai/gpt-oss-20b"))
         self._ollama_model_var.set(fmt.get("ollama_model", "llama3.2:3b"))
         self._fix_grammar_var.set(bool(fmt.get("fix_grammar", True)))
+        self._dev_focus_var.set(bool(fmt.get("developer_focus", True)))
+        flags = cfg.get("vocab_packs") if isinstance(cfg.get("vocab_packs"), dict) else {}
+        for name, var in self._pack_vars.items():
+            var.set(bool(flags.get(name, True)))
 
         # Vocabulary
         self._set_vocab_text(
@@ -899,6 +938,10 @@ class SettingsWindow:
         cfg["format"]["groq_model"] = self._groq_model_var.get()
         cfg["format"]["ollama_model"] = self._ollama_model_var.get()
         cfg["format"]["fix_grammar"] = bool(self._fix_grammar_var.get())
+        cfg["format"]["developer_focus"] = bool(self._dev_focus_var.get())
+        cfg["vocab_packs"] = {
+            name: bool(var.get()) for name, var in self._pack_vars.items()
+        }
         cfg["vocabulary"] = self._get_vocab_terms()
         # API key — return what's currently in the textbox.
         key = self._api_key_var.get().strip() or None
@@ -1135,6 +1178,23 @@ class SettingsWindow:
             import subprocess
 
             subprocess.Popen(["open" if _is_macos() else "xdg-open", path])
+
+    def _quit_imla(self) -> None:
+        """Stop the running Imla app (this window is a separate process)."""
+        from . import single_instance
+
+        if not messagebox.askyesno(
+            "Quit Imla",
+            "Stop Imla completely? Dictation will stop until you start it again.",
+            parent=self._root,
+        ):
+            return
+        if single_instance.request_quit():
+            self._general_status_var.set(
+                "Quit requested: Imla will stop within a second."
+            )
+        else:
+            self._general_status_var.set("Could not send the quit request.")
 
     def _open_log_file(self) -> None:
         path = os.path.join(self._config_dir(), "imla.log")

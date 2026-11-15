@@ -2,7 +2,7 @@
 
 This file is the persistent memory of the project. It records what exists, why it was built that way, what was changed, and what is still open, so work can continue from a fresh `git clone` without the original chat. **Keep it updated whenever you change behaviour** (see "How to maintain this file" at the bottom).
 
-Last updated: 2026-11-15, after commit `6bf3e98`.
+Last updated: 2026-11-15, after commit `88cca8e` plus the uncommitted Java-focus work (section 3, Phase E).
 
 ## 1. What Imla is
 
@@ -26,6 +26,7 @@ The log line to look at when debugging speed/accuracy: `[AUDIO] … | [STT:<engi
 | `imla/transcribe.py` | Engines: `transcribe_groq`, local faster-whisper, `transcribe_detailed` (returns engine, latency, fallback reason), circuit breaker, `test_cloud`, `build_initial_prompt` (vocabulary hint). |
 | `imla/format.py` | Cleanup tiers, `SYSTEM_PROMPT`, `build_system_prompt`, retention guard + length guard, 429 model rotation (`GROQ_FALLBACK_MODELS`), `list_groq_chat_models`. |
 | `imla/config.py` | `default_config()`, load/save (atomic), `get_vocabulary()`. Config lives at `~/.config/imla/config.json`. |
+| `imla/vocabpacks.py` + `imla/vocab/*.txt` | Developer vocabulary packs (`java_spring`, `software_general`): spelling hints and `spoken => Written` replacements. Edit the txt files to extend. |
 | `imla/usage.py` | Daily token / audio-second counters in `~/.config/imla/usage.json`. |
 | `imla/settings.py` | Tkinter Settings window (tabs: General, Transcription, Cleanup, Dictionary, Vocabulary). Runs as a **separate process** (`--settings`). |
 | `imla/tray.py` | System tray (pystray; `NSStatusItem` on macOS). Menu: status, Quick Mute, Settings…, Quit. `notify()` shows the "Imla is ready" toast. |
@@ -59,6 +60,19 @@ Origin: the app was slow (12–15 s per dictation) and missed words, especially 
 **Phase D: desktop app feel**
 - Installer scripts (Windows/Linux/macOS), single-instance guard, file log, key import from `.env` to keychain, tray "Imla is ready" notification, Settings UI for all the options above, README Quick Start section.
 
+**Phase E: software-engineer focus, Java / Spring Boot first**
+- The owner is a Java/Spring Boot engineer, so the app is tuned for that, then general software work.
+- `imla/vocab/`: ~210 Java/Spring terms, ~110 general terms, ~240 replacements (annotations like "at transactional" → `@Transactional`, "j p a" → JPA, exceptions, file names, ports). Replacements are sorted longest-first so specific phrases win.
+- Priority order for hints: user `vocabulary` → java pack → user dictionary targets → general pack. The Whisper hint is capped by characters (`MAX_VOCAB_CHARS=420`) because Whisper keeps only the last ~223 prompt tokens; the cleanup prompt takes the first 80 terms.
+- `get_dictionary(cfg)` is the user's editable list only (Settings uses it, so pack entries never get written to `config.json`); dictation uses `get_effective_dictionary(cfg)` = user entries first, then pack entries.
+- Cleanup prompt rule 9 + two Java few-shot examples (`format.developer_focus`, default on). Config keys: `format.developer_focus`, `vocab_packs`.
+- Live check (Groq): "at autowired … at transactional" → `@Autowired … @Transactional`; "j p a repository … empty optional" → `JpaRepository … empty Optional`; tests in `tests/test_java_focus.py` (offline).
+
+**Phase F: quit without a tray menu (Ubuntu)**
+- On the owner's Ubuntu the tray icon had no menu (pystray falls back to a plain icon whose click opens Settings), so there was no Quit. Added a cross-platform quit request: `single_instance.request_quit()` writes `~/.config/imla/quit.request`; the main app's 1 s watcher thread consumes it and shuts down. Stale markers are cleared at start-up.
+- Entry points: `--quit` CLI flag, **Quit Imla** button in Settings footer, **Quit Imla** launcher created by `scripts/install_linux.sh`. Tests: `tests/test_quit_request.py`.
+- A real Ubuntu tray menu would need the Ayatana AppIndicator Python bindings (`gir1.2-ayatanaappindicator3-0.1`, `python3-gi`) visible to the venv; not attempted.
+
 ## 4. Decisions to respect (and why)
 
 - **Default engine is `auto`**: audio goes to Groq unless the user picks "Local only" in Settings → Transcription. This is a privacy trade-off the owner accepted for speed; keep the note in the UI/README.
@@ -83,7 +97,7 @@ Linux needs system packages (`libportaudio2 python3-tk xclip xdotool`; see READM
 Verify the setup:
 
 ```bash
-PYTHONIOENCODING=utf-8 uv run python -m unittest discover -s tests   # expect 103 tests, 1 known error
+PYTHONIOENCODING=utf-8 uv run python -m unittest discover -s tests   # expect 119 tests, 1 known error
 uv run python tests/bench_stt.py --engine groq --record 8            # needs the key and a mic
 ```
 
@@ -101,17 +115,19 @@ uv run python tests/bench_stt.py --engine groq --record 8            # needs the
 
 | Area | State |
 | :--- | :--- |
-| Unit tests | 102 of 103 pass (see known issue above). |
+| Unit tests | 118 of 119 pass (see known issue above). |
+| Java-focus accuracy | Offline tests plus one live cleanup run of 5 sentences. Not yet measured on real Whisper output from a microphone: collect words it still gets wrong and add them to `imla/vocab/`. |
 | Cloud STT + cleanup live call | Verified on Windows with a synthetic clip. Not benchmarked with real microphone speech. |
 | Windows launchers, tray Quit, ready toast | Verified by the owner on Windows. |
 | Start-on-login | Registry command only string-tested; not rebooted. |
-| Linux and macOS installers | Written, `bash -n` syntax-checked only. Never run. macOS permission persistence untested. |
+| Linux installer | Run by the owner on Ubuntu: launchers appear. Quit gap found and fixed in Phase F; fix not yet re-tested on Ubuntu. |
+| macOS installer | Written, `bash -n` syntax-checked only. Never run. macOS permission persistence untested. |
 | Settings window layout | Seen working by the owner; no formal review of small screens. |
 
 ## 8. Open work (suggested next steps)
 
 1. Run `install_linux.sh` on Ubuntu and `install_macos.sh` on a Mac; fix whatever breaks and update section 7.
-2. Add the owner's technical-term list to Settings → Vocabulary (or defaults in `config.py`).
+2. Collect Java/Spring words Whisper still gets wrong on the owner's real voice and add them to `imla/vocab/` (terms + replacements). Consider a spoken-code formatting mode ("open paren", "dot stream") and importing class/package names from the owner's own repo.
 3. Measure real-microphone accuracy: `tests/bench_stt.py --engine both --record 8`.
 4. Instant "Starting…" feedback before heavy imports (small splash window); "already running" notice on a second launch.
 5. Optional PyInstaller build / installer; app icon (`assets/imla.ico`, `.icns`, `.png` are looked up by the installers but not present).

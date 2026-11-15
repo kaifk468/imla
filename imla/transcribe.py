@@ -39,6 +39,9 @@ DEFAULT_MODEL = "small.en"
 DEFAULT_BEAM_SIZE = 3
 # Whisper's prompt window is ~224 tokens; keep the vocabulary hint well under it.
 MAX_VOCAB_TERMS = 60
+# ...and by characters too: code identifiers/annotations cost many tokens each.
+# Whisper keeps only the LAST ~223 prompt tokens, so stay safely below that.
+MAX_VOCAB_CHARS = 420
 
 _model: Optional[WhisperModel] = None
 _model_name: str = DEFAULT_MODEL
@@ -95,6 +98,8 @@ def build_initial_prompt(vocab: Optional[Iterable[str]]) -> Optional[str]:
         term = (term or "").strip()
         key = term.lower()
         if term and key not in seen:
+            if sum(len(t) + 2 for t in terms) + len(term) > MAX_VOCAB_CHARS:
+                break
             seen.add(key)
             terms.append(term)
         if len(terms) >= MAX_VOCAB_TERMS:

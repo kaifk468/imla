@@ -1,0 +1,113 @@
+# General software-engineering terms (second priority after java_spring).
+API
+REST
+RESTful
+GraphQL
+gRPC
+JSON
+YAML
+XML
+SQL
+NoSQL
+microservices
+monolith
+CI/CD
+GitHub
+GitLab
+Bitbucket
+pull request
+merge request
+code review
+rebase
+cherry-pick
+git stash
+Docker
+Dockerfile
+Docker Compose
+Kubernetes
+kubectl
+Helm
+Terraform
+Ansible
+AWS
+S3
+EC2
+Lambda
+Azure
+GCP
+Nginx
+Linux
+bash
+SSH
+curl
+Postman
+IntelliJ
+IntelliJ IDEA
+VS Code
+Eclipse
+TypeScript
+JavaScript
+Node.js
+React
+Angular
+Next.js
+Python
+PyTorch
+pytest
+Go
+Rust
+Kotlin
+Scala
+Redis
+Kafka
+OAuth
+SAML
+TLS
+HTTPS
+CORS
+CSRF
+XSS
+SQL injection
+idempotent
+eventual consistency
+CAP theorem
+load balancer
+rate limiting
+cache invalidation
+refactor
+technical debt
+unit test
+integration test
+end-to-end test
+TDD
+BDD
+Agile
+Scrum
+sprint
+standup
+Jira
+Confluence
+Slack
+SOLID
+DRY
+design pattern
+singleton
+factory pattern
+observer pattern
+dependency inversion
+regex
+UUID
+enum
+boolean
+null
+async
+await
+callback
+middleware
+endpoint
+payload
+webhook
+latency
+throughput
+observability
+OpenTelemetry

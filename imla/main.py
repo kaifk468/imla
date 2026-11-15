@@ -48,7 +48,7 @@ load_dotenv()
 from .audio import Recorder
 from .config import (
     CONFIG_PATH,
-    get_dictionary,
+    get_effective_dictionary,
     get_vocabulary,
     load_config,
     save_config,
@@ -124,6 +124,11 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "--settings",
         action="store_true",
         help="Open the Settings dashboard directly.",
+    )
+    parser.add_argument(
+        "--quit",
+        action="store_true",
+        help="Ask the running Imla to quit, then exit.",
     )
     parser.add_argument(
         "--config",
@@ -291,9 +296,10 @@ def _run_finalize(
                 groq_model=fmt_cfg.get("groq_model", "openai/gpt-oss-20b"),
                 ollama_model=fmt_cfg.get("ollama_model", "llama3.2:3b"),
                 tier_override=fmt_cfg.get("tier", "auto"),
-                dictionary=get_dictionary(config),
+                dictionary=get_effective_dictionary(config),
                 vocabulary=get_vocabulary(config),
                 fix_grammar=bool(fmt_cfg.get("fix_grammar", True)),
+                developer_focus=bool(fmt_cfg.get("developer_focus", True)),
                 # The short-utterance LLM bypass saves quota but can't fix
                 # grammar, so only use it when grammar fixing is off.
                 skip_llm_for_short=not bool(fmt_cfg.get("fix_grammar", True)),
@@ -429,6 +435,11 @@ def main(argv: Optional[list] = None) -> int:
     if args.list_devices:
         return cmd_list_devices()
 
+    if args.quit:
+        ok = single_instance.request_quit()
+        print("Asked Imla to quit." if ok else "Could not write the quit request.")
+        return 0 if ok else 1
+
     config_path = args.config or str(CONFIG_PATH)
     config_path_obj = Path(config_path)
     config = load_config(path=config_path_obj)
@@ -438,6 +449,9 @@ def main(argv: Optional[list] = None) -> int:
     if not args.settings and not single_instance.acquire("imla"):
         log.info("Imla is already running; exiting this second instance.")
         return 0
+
+    # A stale "quit" marker (left when nothing was running) must not kill us.
+    single_instance.clear_quit_request()
 
     # Copy a .env key into the OS keychain so the app also works when it is
     # not started from the project folder (desktop shortcut, start on login).
@@ -483,6 +497,7 @@ def main(argv: Optional[list] = None) -> int:
         config.get("format", {}),
         has_groq_key=bool(get_api_key()),
         vocabulary=get_vocabulary(config),
+        developer_focus=bool(config.get("format", {}).get("developer_focus", True)),
     )
 
     if not is_trusted(prompt=True):
@@ -669,6 +684,10 @@ def main(argv: Optional[list] = None) -> int:
     def watch_config() -> None:
         while not shutdown_event.wait(1.0):
             try:
+                if single_instance.quit_requested():
+                    log.info("Quit requested from Settings / --quit.")
+                    request_quit()
+                    return
                 reload_config_if_changed()
             except Exception:  # noqa: BLE001
                 log.exception("Failed to reload settings.")

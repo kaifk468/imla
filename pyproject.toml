@@ -39,6 +39,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["imla"]
 
+[tool.setuptools.package-data]
+imla = ["vocab/*.txt"]
+
 [tool.uv]
 required-environments = [
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
