@@ -4,6 +4,8 @@ A fast, cross-platform push-to-talk voice dictation desktop app with local speec
 
 Hold **Right Option / Right Alt** to speak, and release to automatically transcribe, clean up, and paste the text at your active cursor without stealing window focus.
 
+> **Continuing this project in a new session or on another machine?** Read [`context.md`](context.md): it records what was built and why, decisions, known issues, verification status and next steps.
+
 ---
 
 ## Quick Start: One-Click App (run the installer once)
