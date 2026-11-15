@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import time
 from typing import Callable, Optional
 
 log = logging.getLogger("imla.tray")
@@ -269,6 +270,23 @@ if sys.platform != "darwin":
                 except Exception:  # noqa: BLE001
                     pass
 
+        def notify(self, title: str, message: str) -> None:
+            """Balloon/toast from the tray icon. The icon needs a moment to
+            become visible after start(), so retry briefly in a thread."""
+
+            def _go() -> None:
+                for _ in range(20):
+                    icon = self._icon
+                    if icon is not None and getattr(icon, "visible", False):
+                        try:
+                            icon.notify(message, title)
+                        except Exception:  # noqa: BLE001
+                            log.debug("pystray notify failed.", exc_info=True)
+                        return
+                    time.sleep(0.25)
+
+            threading.Thread(target=_go, daemon=True, name="imla-notify").start()
+
         def _toggle_mute_clicked(self, icon, item) -> None:
             try:
                 self._on_toggle_mute(not self._is_muted())
@@ -362,3 +380,13 @@ class TrayController:
 
     def update(self) -> None:
         self._impl.update()
+
+    def notify(self, title: str, message: str) -> None:
+        """Show a short desktop notification (toast/balloon). Best effort."""
+        fn = getattr(self._impl, "notify", None)
+        if fn is None:
+            return
+        try:
+            fn(title, message)
+        except Exception:  # noqa: BLE001
+            log.debug("Tray notification failed.", exc_info=True)

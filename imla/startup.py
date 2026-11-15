@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -135,9 +136,27 @@ def _windows_run_key():
 
 
 def _windows_command() -> str:
-    python = sys.executable
-    project_root = _project_root()
-    return f'"{python}" -m imla.main'
+    """Command line stored in the HKCU Run value.
+
+    A Run value has no working-directory field, so a plain ``-m imla.main``
+    only works if the package is importable from any cwd. The venv has an
+    editable install (.pth finder), but that breaks if the install is ever
+    redone elsewhere, so for a source checkout we use a tiny bootstrap that
+    chdirs to the project root and puts it on sys.path first. That works from
+    any cwd regardless of install state, and pythonw.exe means no console
+    window. Frozen builds are self-contained: just the exe.
+    """
+    from . import launcher
+
+    if launcher.is_frozen():
+        return subprocess.list2cmdline(launcher.launch_command())
+    root = str(launcher.project_root())
+    bootstrap = (
+        "import os,sys; "
+        f"os.chdir({root!r}); sys.path.insert(0, {root!r}); "
+        "from imla.main import main; raise SystemExit(main())"
+    )
+    return subprocess.list2cmdline([launcher.gui_python(), "-c", bootstrap])
 
 
 def _windows_registry_value_exists() -> bool:

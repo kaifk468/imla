@@ -1,6 +1,6 @@
 """Tkinter Settings Dashboard for Imla.
 
-Four tabs: General, Transcription, Cleanup, Dictionary.
+Five tabs: General, Transcription, Cleanup, Vocabulary, Dictionary.
 Footer: stats, dirty badge, Cancel, Save.
 
 Dirty tracking
@@ -57,8 +57,8 @@ from .keychain import get_api_key, set_api_key, test_connection as groq_test
 
 log = logging.getLogger("imla.settings")
 
-DEFAULT_SIZE = "600x620"
-MIN_SIZE = "560x560"
+DEFAULT_SIZE = "640x740"
+MIN_SIZE = "560x640"
 
 HOTKEY_CHOICES = [
     ("Right Alt / Option", "Key.alt_r"),
@@ -72,8 +72,64 @@ HOTKEY_CHOICES = [
     ("F2", "Key.f2"),
 ]
 
-WHISPER_MODELS = ["tiny", "base", "small", "medium"]
+WHISPER_MODELS = [
+    "tiny", "base", "small", "small.en", "medium", "distil-large-v3",
+]
 TIER_CHOICES = ["auto", "groq", "ollama", "rule"]
+ENGINE_CHOICES = [
+    ("Auto \u2014 cloud first, local fallback", "auto"),
+    ("Cloud only", "cloud"),
+    ("Local only (audio never leaves this PC)", "local"),
+]
+CLOUD_MODELS = ["whisper-large-v3-turbo", "whisper-large-v3"]
+NO_USAGE_TEXT = "No cloud usage recorded today."
+FREE_TIER_NOTE = (
+    "Groq free tier: about 200K tokens/day per cleanup model and "
+    "8 hours/day of cloud Whisper audio."
+)
+VOCAB_HELP = (
+    "Technical terms, names and acronyms. Helps speech recognition and "
+    "cleanup spell them correctly."
+)
+
+
+def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
+    """Parse ``value`` as an int clamped to [lo, hi]; ``default`` if invalid."""
+    try:
+        n = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        n = default
+    return max(lo, min(hi, n))
+
+
+def parse_vocabulary(text: str) -> List[str]:
+    """Split text into terms: one per line, stripped, empties dropped,
+    case-insensitively de-duplicated (order preserved)."""
+    out: List[str] = []
+    seen = set()
+    for line in text.splitlines():
+        term = line.strip()
+        if term and term.lower() not in seen:
+            seen.add(term.lower())
+            out.append(term)
+    return out
+
+
+def _normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill keys the UI manages with defaults (older configs lack them) so
+    the dirty baseline matches what the widgets will collect."""
+    d = default_config()
+    tr = cfg.setdefault("transcription", {})
+    for k in ("engine", "cloud_model", "beam_size", "cpu_threads"):
+        tr.setdefault(k, d["transcription"][k])
+    fmt = cfg.setdefault("format", {})
+    fmt.setdefault("fix_grammar", d["format"]["fix_grammar"])
+    cfg.setdefault("tail_ms", d["tail_ms"])
+    vocab = cfg.get("vocabulary")
+    cfg["vocabulary"] = parse_vocabulary(
+        "\n".join(t for t in vocab if isinstance(t, str))
+    ) if isinstance(vocab, list) else []
+    return cfg
 
 
 class SettingsWindow:
@@ -99,8 +155,8 @@ class SettingsWindow:
         """
         self._on_apply = on_apply
         self._config_path = config_path or CONFIG_PATH
-        self._working: Dict[str, Any] = copy.deepcopy(initial_config)
-        self._initial: Dict[str, Any] = copy.deepcopy(initial_config)
+        self._working: Dict[str, Any] = _normalize_config(copy.deepcopy(initial_config))
+        self._initial: Dict[str, Any] = _normalize_config(copy.deepcopy(initial_config))
         self._initial_key: Optional[str] = get_api_key()
         self._pending_key: Optional[str] = self._initial_key  # current textbox value
         self._dirty = False
@@ -116,6 +172,11 @@ class SettingsWindow:
         self._dict_tree: Optional[ttk.Treeview] = None
         self._vosk_download_btn: Optional[ttk.Button] = None
         self._vosk_progress: Optional[ttk.Progressbar] = None
+        self._vocab_text: Optional[tk.Text] = None
+        self._usage_text: Optional[tk.Text] = None
+        self._test_cloud_btn: Optional[ttk.Button] = None
+        self._groq_refresh_btn: Optional[ttk.Button] = None
+        self._groq_box: Optional[ttk.Combobox] = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -133,7 +194,7 @@ class SettingsWindow:
         root = tk.Tk()
         root.title("Imla Settings")
         root.geometry(DEFAULT_SIZE)
-        root.minsize(560, 560)
+        root.minsize(560, 640)
         root.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self._root = root
 
@@ -149,6 +210,15 @@ class SettingsWindow:
         self._preview_status_var = tk.StringVar(master=root, value="Model: checking…")
         self._tier_var = tk.StringVar(master=root)
         self._groq_model_var = tk.StringVar(master=root)
+        self._engine_var = tk.StringVar(master=root)
+        self._cloud_model_var = tk.StringVar(master=root)
+        self._beam_var = tk.StringVar(master=root)
+        self._threads_var = tk.StringVar(master=root)
+        self._fix_grammar_var = tk.BooleanVar(master=root)
+        self._tail_var = tk.StringVar(master=root)
+        self._cloud_status_var = tk.StringVar(master=root, value="")
+        self._groq_status_var = tk.StringVar(master=root, value="")
+        self._general_status_var = tk.StringVar(master=root, value="")
         self._ollama_model_var = tk.StringVar(master=root)
         self._api_key_var = tk.StringVar(master=root)
         self._test_result_var = tk.StringVar(master=root, value="")
@@ -169,6 +239,7 @@ class SettingsWindow:
         self._build_general_tab(notebook)
         self._build_transcription_tab(notebook)
         self._build_cleanup_tab(notebook)
+        self._build_vocabulary_tab(notebook)
         self._build_dictionary_tab(notebook)
 
         self._build_footer(root)
@@ -220,17 +291,43 @@ class SettingsWindow:
         mic_box.grid(row=2, column=1, sticky="we", pady=6)
         mic_box.bind("<<ComboboxSelected>>", lambda e: self._mark_dirty())
 
+        # Tail (keep recording after key release)
+        ttk.Label(frame, text="Keep recording after key release (ms)").grid(
+            row=3, column=0, sticky="w", pady=6
+        )
+        ttk.Spinbox(
+            frame, from_=0, to=1000, increment=50, width=8,
+            textvariable=self._tail_var,
+        ).grid(row=3, column=1, sticky="w", pady=6)
+        self._tail_var.trace_add("write", lambda *_: self._mark_dirty())
+
         # Overlay toggle
         ttk.Checkbutton(
             frame, text="Show floating overlay while recording",
             variable=self._overlay_var, command=self._mark_dirty,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=6)
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=6)
 
         # Start on login
         ttk.Checkbutton(
             frame, text="Start Imla when I log in",
             variable=self._start_on_login_var, command=self._mark_dirty,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=6)
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=6)
+
+        # Files
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=6, column=0, columnspan=3, sticky="we", pady=10
+        )
+        files = ttk.Frame(frame)
+        files.grid(row=7, column=0, columnspan=3, sticky="w")
+        ttk.Button(files, text="Open log file", command=self._open_log_file).pack(
+            side="left"
+        )
+        ttk.Button(
+            files, text="Open config folder", command=self._open_config_folder
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(frame, textvariable=self._general_status_var, foreground="#555").grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
 
         frame.columnconfigure(1, weight=1)
 
@@ -238,14 +335,54 @@ class SettingsWindow:
         frame = ttk.Frame(notebook, padding=12)
         notebook.add(frame, text="Transcription")
 
-        ttk.Label(frame, text="Whisper model").grid(
+        # Engine
+        ttk.Label(frame, text="Speech engine").grid(
             row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        engine_box = ttk.Combobox(
+            frame, textvariable=self._engine_var, state="readonly",
+            values=[label for label, _ in ENGINE_CHOICES], width=38,
+        )
+        engine_box.grid(row=0, column=1, columnspan=2, sticky="w", pady=(0, 6))
+        engine_box.bind("<<ComboboxSelected>>", lambda e: self._mark_dirty())
+        ttk.Label(
+            frame,
+            text="Auto/Cloud send your recorded audio to Groq. "
+                 "Local keeps audio on this PC but is slower.",
+            foreground="#555", wraplength=520, justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+
+        # Cloud model + test
+        ttk.Label(frame, text="Cloud model").grid(
+            row=2, column=0, sticky="w", pady=6
+        )
+        cloud_box = ttk.Combobox(
+            frame, textvariable=self._cloud_model_var, state="readonly",
+            values=CLOUD_MODELS, width=24,
+        )
+        cloud_box.grid(row=2, column=1, sticky="w", pady=6)
+        cloud_box.bind("<<ComboboxSelected>>", lambda e: self._mark_dirty())
+        self._cloud_box = cloud_box
+        self._test_cloud_btn = ttk.Button(
+            frame, text="Test cloud", command=self._test_cloud
+        )
+        self._test_cloud_btn.grid(row=2, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(frame, textvariable=self._cloud_status_var, wraplength=540).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(0, 4)
+        )
+
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=4, column=0, columnspan=3, sticky="we", pady=8
+        )
+
+        ttk.Label(frame, text="Local model (fallback)").grid(
+            row=5, column=0, sticky="w", pady=(0, 6)
         )
         model_box = ttk.Combobox(
             frame, textvariable=self._whisper_model_var, state="readonly",
             values=WHISPER_MODELS, width=18,
         )
-        model_box.grid(row=0, column=1, sticky="w", pady=(0, 6))
+        model_box.grid(row=5, column=1, sticky="w", pady=(0, 6))
         model_box.bind(
             "<<ComboboxSelected>>",
             lambda e: (self._mark_dirty(), self._refresh_transcription_badges()),
@@ -253,27 +390,43 @@ class SettingsWindow:
 
         # Cache badge
         ttk.Label(frame, textvariable=self._whisper_badge_var).grid(
-            row=0, column=2, sticky="w", padx=(8, 0)
+            row=5, column=2, sticky="w", padx=(8, 0)
         )
 
         ttk.Label(
             frame,
             text="Model will load on next dictation.",
             foreground="#555",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
+        ttk.Label(frame, text="Beam size (1-5)").grid(
+            row=7, column=0, sticky="w", pady=4
+        )
+        ttk.Spinbox(
+            frame, from_=1, to=5, width=6, textvariable=self._beam_var
+        ).grid(row=7, column=1, sticky="w", pady=4)
+        self._beam_var.trace_add("write", lambda *_: self._mark_dirty())
+
+        ttk.Label(frame, text="CPU threads (0 = auto)").grid(
+            row=8, column=0, sticky="w", pady=4
+        )
+        ttk.Spinbox(
+            frame, from_=0, to=16, width=6, textvariable=self._threads_var
+        ).grid(row=8, column=1, sticky="w", pady=4)
+        self._threads_var.trace_add("write", lambda *_: self._mark_dirty())
 
         ttk.Separator(frame, orient="horizontal").grid(
-            row=2, column=0, columnspan=3, sticky="we", pady=8
+            row=9, column=0, columnspan=3, sticky="we", pady=8
         )
 
         # Live preview
         ttk.Checkbutton(
             frame, text="Live streaming preview (Vosk)",
             variable=self._preview_var, command=self._mark_dirty,
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=6)
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=6)
 
         vosk_frame = ttk.Frame(frame)
-        vosk_frame.grid(row=4, column=0, columnspan=3, sticky="we", pady=(2, 4))
+        vosk_frame.grid(row=11, column=0, columnspan=3, sticky="we", pady=(2, 4))
 
         self._vosk_download_btn = ttk.Button(
             vosk_frame,
@@ -288,7 +441,7 @@ class SettingsWindow:
         self._vosk_progress.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         ttk.Label(frame, textvariable=self._preview_status_var).grid(
-            row=5, column=0, columnspan=3, sticky="w", pady=(2, 0)
+            row=12, column=0, columnspan=3, sticky="w", pady=(2, 0)
         )
 
         frame.columnconfigure(1, weight=1)
@@ -313,30 +466,43 @@ class SettingsWindow:
         ttk.Label(frame, text="Groq model").grid(
             row=1, column=0, sticky="w", pady=6
         )
-        groq_entry = ttk.Entry(frame, textvariable=self._groq_model_var, width=32)
-        groq_entry.grid(row=1, column=1, sticky="we", pady=6)
+        groq_box = ttk.Combobox(frame, textvariable=self._groq_model_var, width=32)
+        groq_box.grid(row=1, column=1, sticky="we", pady=6)
+        self._groq_box = groq_box
         self._groq_model_var.trace_add("write", lambda *_: self._mark_dirty())
+        self._groq_refresh_btn = ttk.Button(
+            frame, text="Refresh", width=9, command=self._refresh_groq_models
+        )
+        self._groq_refresh_btn.grid(row=1, column=2, sticky="w", padx=(6, 0))
+        ttk.Label(frame, textvariable=self._groq_status_var, foreground="#555").grid(
+            row=2, column=1, columnspan=2, sticky="w"
+        )
 
         # Ollama model name
         ttk.Label(frame, text="Ollama model").grid(
-            row=2, column=0, sticky="w", pady=6
+            row=3, column=0, sticky="w", pady=6
         )
         ollama_entry = ttk.Entry(frame, textvariable=self._ollama_model_var, width=32)
-        ollama_entry.grid(row=2, column=1, sticky="we", pady=6)
+        ollama_entry.grid(row=3, column=1, sticky="we", pady=6)
         self._ollama_model_var.trace_add("write", lambda *_: self._mark_dirty())
 
+        ttk.Checkbutton(
+            frame, text="Fix grammar mistakes",
+            variable=self._fix_grammar_var, command=self._mark_dirty,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=6)
+
         ttk.Separator(frame, orient="horizontal").grid(
-            row=3, column=0, columnspan=3, sticky="we", pady=10
+            row=5, column=0, columnspan=3, sticky="we", pady=8
         )
 
         # API key
         ttk.Label(frame, text="Groq API key (stored in OS keychain)").grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(0, 4)
+            row=6, column=0, columnspan=2, sticky="w", pady=(0, 4)
         )
         key_frame = ttk.Frame(frame)
-        key_frame.grid(row=5, column=0, columnspan=3, sticky="we")
+        key_frame.grid(row=7, column=0, columnspan=3, sticky="we")
         self._api_key_entry = ttk.Entry(
-            key_frame, textvariable=self._api_key_var, width=44, show="•",
+            key_frame, textvariable=self._api_key_var, width=44, show="\u2022",
         )
         self._api_key_entry.pack(side="left")
         self._api_key_var.trace_add("write", lambda *_: self._mark_dirty())
@@ -350,10 +516,72 @@ class SettingsWindow:
         self._test_btn.pack(side="left", padx=(6, 0))
 
         ttk.Label(frame, textvariable=self._test_result_var).grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(6, 0)
+            row=8, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
+        ttk.Separator(frame, orient="horizontal").grid(
+            row=9, column=0, columnspan=3, sticky="we", pady=8
+        )
+
+        # Usage today
+        usage_head = ttk.Frame(frame)
+        usage_head.grid(row=10, column=0, columnspan=3, sticky="we")
+        ttk.Label(usage_head, text="Usage today").pack(side="left")
+        ttk.Button(
+            usage_head, text="Refresh", width=9, command=self._refresh_usage
+        ).pack(side="left", padx=(8, 0))
+        self._usage_text = tk.Text(
+            frame, height=4, width=60, wrap="word", relief="flat",
+            state="disabled", background=ttk.Style().lookup("TFrame", "background") or "#f0f0f0",
+        )
+        self._usage_text.grid(row=11, column=0, columnspan=3, sticky="we", pady=(4, 0))
+        ttk.Label(
+            frame, text=FREE_TIER_NOTE, foreground="#555", wraplength=540,
+            justify="left",
+        ).grid(row=12, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
         frame.columnconfigure(1, weight=1)
+
+    def _build_vocabulary_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, padding=12)
+        notebook.add(frame, text="Vocabulary")
+
+        ttk.Label(
+            frame, text=VOCAB_HELP, foreground="#555", wraplength=540, justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        ttk.Label(
+            frame, text="One term per line.", foreground="#555",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        self._vocab_text = tk.Text(frame, height=14, width=50, wrap="none", undo=True)
+        self._vocab_text.grid(row=2, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self._vocab_text.yview)
+        scroll.grid(row=2, column=1, sticky="ns")
+        self._vocab_text.configure(yscrollcommand=scroll.set)
+        self._vocab_text.bind("<KeyRelease>", lambda e: self._mark_dirty())
+        self._vocab_text.bind("<<Modified>>", self._on_vocab_modified)
+
+        frame.rowconfigure(2, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+    def _on_vocab_modified(self, _event=None) -> None:
+        if self._vocab_text is None:
+            return
+        if self._vocab_text.edit_modified():
+            self._vocab_text.edit_modified(False)
+            self._mark_dirty()
+
+    def _set_vocab_text(self, terms: List[str]) -> None:
+        if self._vocab_text is None:
+            return
+        self._vocab_text.delete("1.0", "end")
+        self._vocab_text.insert("1.0", "\n".join(terms))
+        self._vocab_text.edit_modified(False)
+
+    def _get_vocab_terms(self) -> List[str]:
+        if self._vocab_text is None:
+            return list(self._working.get("vocabulary", []))
+        return parse_vocabulary(self._vocab_text.get("1.0", "end"))
 
     def _build_dictionary_tab(self, notebook: ttk.Notebook) -> None:
         frame = ttk.Frame(notebook, padding=12)
@@ -450,6 +678,7 @@ class SettingsWindow:
         )
         self._hotkey_var.set(hk_label)
         self._pre_roll_var.set(int(cfg.get("pre_roll_ms", 0)))
+        self._tail_var.set(str(_clamp_int(cfg.get("tail_ms", 250), 0, 1000, 250)))
         # Mic: match by device index stored in config
         self._current_device_index = cfg.get("input_device")
         self._refresh_mic_combobox()
@@ -461,14 +690,31 @@ class SettingsWindow:
             self._start_on_login_var.set(bool(cfg.get("start_on_login", False)))
 
         # Transcription
-        self._whisper_model_var.set(cfg.get("transcription", {}).get("model", "base"))
-        self._preview_var.set(bool(cfg.get("transcription", {}).get("preview_enabled", True)))
+        tr = cfg.get("transcription", {})
+        self._whisper_model_var.set(tr.get("model", "base"))
+        self._preview_var.set(bool(tr.get("preview_enabled", True)))
+        engine = tr.get("engine", "auto")
+        self._engine_var.set(
+            next((l for l, v in ENGINE_CHOICES if v == engine), engine)
+        )
+        cloud_model = tr.get("cloud_model", CLOUD_MODELS[0])
+        self._cloud_model_var.set(cloud_model)
+        if cloud_model not in CLOUD_MODELS and getattr(self, "_cloud_box", None):
+            self._cloud_box.configure(values=CLOUD_MODELS + [cloud_model])
+        self._beam_var.set(str(_clamp_int(tr.get("beam_size", 3), 1, 5, 3)))
+        self._threads_var.set(str(_clamp_int(tr.get("cpu_threads", 0), 0, 16, 0)))
 
         # Cleanup
         fmt = cfg.get("format", {})
         self._tier_var.set(fmt.get("tier", "auto"))
-        self._groq_model_var.set(fmt.get("groq_model", "llama-3.3-70b-versatile"))
+        self._groq_model_var.set(fmt.get("groq_model", "openai/gpt-oss-20b"))
         self._ollama_model_var.set(fmt.get("ollama_model", "llama3.2:3b"))
+        self._fix_grammar_var.set(bool(fmt.get("fix_grammar", True)))
+
+        # Vocabulary
+        self._set_vocab_text(
+            [t for t in cfg.get("vocabulary", []) if isinstance(t, str)]
+        )
 
         # API key from keychain (never from config)
         if self._initial_key:
@@ -479,6 +725,7 @@ class SettingsWindow:
 
         # Refresh badges
         self._refresh_transcription_badges()
+        self._refresh_usage()
 
         # Now compute dirty baseline (must be after all vars loaded).
         self._refresh_dirty()
@@ -514,7 +761,9 @@ class SettingsWindow:
                 "tiny": "75MB",
                 "base": "145MB",
                 "small": "480MB",
+                "small.en": "480MB",
                 "medium": "1.5GB",
+                "distil-large-v3": "1.5GB",
             }
             approx = approx_sizes.get(model_name, "")
             matches = (
@@ -628,17 +877,29 @@ class SettingsWindow:
             (idx for label, idx in self._mic_choices if label == mic_label),
             None,
         )
+        cfg["tail_ms"] = _clamp_int(
+            self._tail_var.get(), 0, 1000, int(self._initial.get("tail_ms", 250))
+        )
         cfg["overlay_enabled"] = bool(self._overlay_var.get())
         cfg["start_on_login"] = bool(self._start_on_login_var.get())
         # Transcription
         cfg.setdefault("transcription", {})
         cfg["transcription"]["model"] = self._whisper_model_var.get()
         cfg["transcription"]["preview_enabled"] = bool(self._preview_var.get())
+        engine_label = self._engine_var.get()
+        cfg["transcription"]["engine"] = next(
+            (v for l, v in ENGINE_CHOICES if l == engine_label), engine_label or "auto"
+        )
+        cfg["transcription"]["cloud_model"] = self._cloud_model_var.get() or CLOUD_MODELS[0]
+        cfg["transcription"]["beam_size"] = _clamp_int(self._beam_var.get(), 1, 5, 3)
+        cfg["transcription"]["cpu_threads"] = _clamp_int(self._threads_var.get(), 0, 16, 0)
         # Cleanup
         cfg.setdefault("format", {})
         cfg["format"]["tier"] = self._tier_var.get()
         cfg["format"]["groq_model"] = self._groq_model_var.get()
         cfg["format"]["ollama_model"] = self._ollama_model_var.get()
+        cfg["format"]["fix_grammar"] = bool(self._fix_grammar_var.get())
+        cfg["vocabulary"] = self._get_vocab_terms()
         # API key — return what's currently in the textbox.
         key = self._api_key_var.get().strip() or None
         return cfg, key
@@ -766,6 +1027,134 @@ class SettingsWindow:
             self._root.update_idletasks()
         ok, message = groq_test(key)
         self._test_result_var.set(("✓ " if ok else "✗ ") + message)
+
+    # ------------------------------------------------------------------
+    # Cloud test / model list / usage / files
+
+    def _after(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` on the Tk thread (safe from worker threads)."""
+        try:
+            if self._root is not None:
+                self._root.after(0, fn)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _test_cloud(self) -> None:
+        if self._test_cloud_btn is not None:
+            self._test_cloud_btn.configure(state="disabled")
+        self._cloud_status_var.set("Testing cloud transcription\u2026")
+
+        def _run() -> None:
+            result = self._test_cloud_worker()
+            self._after(lambda: self._on_test_cloud_done(result))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _test_cloud_worker(self) -> Tuple[bool, str]:
+        """Blocking call (run off the Tk thread). Never raises."""
+        try:
+            from .transcribe import test_cloud
+
+            ok, message, latency = test_cloud(api_key=None)
+            if latency:
+                message = f"{message} ({float(latency):.1f}s)"
+            return bool(ok), str(message)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Cloud test failed: %s", exc)
+            return False, f"Cloud test unavailable: {exc}"
+
+    def _on_test_cloud_done(self, result: Tuple[bool, str]) -> None:
+        ok, message = result
+        self._cloud_status_var.set(("\u2713 " if ok else "\u2717 ") + message)
+        if self._test_cloud_btn is not None:
+            self._test_cloud_btn.configure(state="normal")
+
+    def _refresh_groq_models(self) -> None:
+        if self._groq_refresh_btn is not None:
+            self._groq_refresh_btn.configure(state="disabled")
+        self._groq_status_var.set("Fetching models\u2026")
+
+        def _run() -> None:
+            models = self._fetch_groq_models_worker()
+            self._after(lambda: self._on_groq_models(models))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _fetch_groq_models_worker(self) -> List[str]:
+        """Blocking call (run off the Tk thread). Never raises."""
+        try:
+            from .format import list_groq_chat_models
+
+            return [str(m) for m in (list_groq_chat_models(api_key=None) or [])]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not list Groq models: %s", exc)
+            return []
+
+    def _on_groq_models(self, models: List[str]) -> None:
+        if self._groq_refresh_btn is not None:
+            self._groq_refresh_btn.configure(state="normal")
+        if not models:
+            self._groq_status_var.set(
+                "Could not fetch models (check key / internet)"
+            )
+            return
+        current = self._groq_model_var.get()
+        values = list(models)
+        if current and current not in values:
+            values.insert(0, current)
+        if self._groq_box is not None:
+            self._groq_box.configure(values=values)
+        self._groq_status_var.set(f"{len(models)} models available.")
+
+    def _refresh_usage(self) -> None:
+        try:
+            from .usage import summary_lines
+
+            lines = [str(l) for l in (summary_lines() or [])]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Usage summary unavailable: %s", exc)
+            lines = []
+        self._set_usage_lines(lines)
+
+    def _set_usage_lines(self, lines: List[str]) -> None:
+        if self._usage_text is None:
+            return
+        text = "\n".join(lines) if lines else NO_USAGE_TEXT
+        self._usage_text.configure(state="normal")
+        self._usage_text.delete("1.0", "end")
+        self._usage_text.insert("1.0", text)
+        self._usage_text.configure(state="disabled")
+
+    def _config_dir(self) -> str:
+        return os.path.dirname(os.path.abspath(str(self._config_path)))
+
+    def _open_path(self, path: str) -> None:
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606
+        else:
+            import subprocess
+
+            subprocess.Popen(["open" if _is_macos() else "xdg-open", path])
+
+    def _open_log_file(self) -> None:
+        path = os.path.join(self._config_dir(), "imla.log")
+        if not os.path.exists(path):
+            self._general_status_var.set("No log file yet (nothing logged).")
+            return
+        try:
+            self._open_path(path)
+            self._general_status_var.set("")
+        except Exception as exc:  # noqa: BLE001
+            self._general_status_var.set(f"Could not open log file: {exc}")
+
+    def _open_config_folder(self) -> None:
+        path = self._config_dir()
+        try:
+            os.makedirs(path, exist_ok=True)
+            self._open_path(path)
+            self._general_status_var.set("")
+        except Exception as exc:  # noqa: BLE001
+            self._general_status_var.set(f"Could not open config folder: {exc}")
 
     # ------------------------------------------------------------------
     # Dictionary handlers

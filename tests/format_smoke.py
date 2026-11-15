@@ -43,8 +43,8 @@ CASES = [
     ),
     (
         "um so I was thinking like maybe we should uh you know try the new approach",
-        "So I was thinking maybe we should try the new approach.",
-        "filler words removed (um, uh, like, you know)",
+        "So I was thinking like maybe we should try the new approach.",
+        "fillers removed (um, uh, you know); 'like' kept (regex can't tell filler from meaning)",
     ),
     (
         "send a message to John comma tell him the meeting is at three period",

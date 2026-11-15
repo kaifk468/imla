@@ -18,12 +18,66 @@ from dotenv import load_dotenv
 import keyring
 import keyring.errors
 
-load_dotenv()
+load_dotenv()  # default search (cwd / script dir upwards)
+
+
+def _load_extra_env_files() -> None:
+    """Also load .env from the project root and ~/.config/imla (no override)."""
+    from pathlib import Path
+
+    candidates = []
+    try:
+        from .launcher import project_root
+
+        candidates.append(project_root() / ".env")
+    except Exception:  # noqa: BLE001
+        pass
+    candidates.append(Path.home() / ".config" / "imla" / ".env")
+    for p in candidates:
+        try:
+            if p.is_file():
+                load_dotenv(p, override=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_load_extra_env_files()
 
 log = logging.getLogger("imla.keychain")
 
 SERVICE_NAME = "Imla"
 KEY_NAME = "groq_api_key"
+
+
+def _get_keyring_key() -> Optional[str]:
+    """Key from the OS keychain only (no env fallback); None on any failure."""
+    try:
+        key = keyring.get_password(SERVICE_NAME, KEY_NAME)
+        return key if key else None
+    except Exception as e:  # noqa: BLE001
+        log.warning("Keyring unavailable: %s", type(e).__name__)
+        return None
+
+
+def import_env_key_if_missing() -> bool:
+    """Copy GROQ_API_KEY from the environment (.env) into the keychain.
+
+    Returns True only if a key was newly stored. Never raises, never logs
+    the key.
+    """
+    try:
+        if _get_keyring_key():
+            return False
+        env_key = (os.environ.get("GROQ_API_KEY") or "").strip()
+        if not env_key:
+            return False
+        ok = set_api_key(env_key)
+        if ok:
+            log.info("Imported GROQ_API_KEY from environment into keychain")
+        return bool(ok)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Key import failed: %s", type(e).__name__)
+        return False
 
 
 def get_api_key() -> Optional[str]:

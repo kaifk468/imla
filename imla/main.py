@@ -33,29 +33,49 @@ from typing import Any, Callable, Dict, Optional
 
 from dotenv import load_dotenv  # noqa: E402
 
+# Logging first: under pythonw.exe (desktop shortcut) stdout/stderr are None,
+# and the heavy imports below may print or warn.
+from . import applog  # noqa: E402
+
+applog.setup_logging()
+applog.install_excepthook()
+
 import numpy as np  # noqa: E402
 import sounddevice as sd  # noqa: E402
 
 load_dotenv()
 
 from .audio import Recorder
-from .config import CONFIG_PATH, get_dictionary, load_config, save_config
+from .config import (
+    CONFIG_PATH,
+    get_dictionary,
+    get_vocabulary,
+    load_config,
+    save_config,
+)
 from .dictionary import apply_dictionary, compile_dictionary
-from .format import clean_transcript
+from .format import clean_transcript, log_format_setup
 from .hotkey import PushToTalk
 from .hud import HUD
 from .inject import accessibility_hint, inject_text, is_trusted
-from .keychain import get_api_key, set_api_key
+from . import launcher, single_instance
+from .keychain import get_api_key, import_env_key_if_missing, set_api_key
 from .preview import StreamingPreview
 from .startup import enable as startup_enable, disable as startup_disable, is_enabled as startup_is_enabled
-from .transcribe import set_model_name, transcribe
+from .transcribe import (
+    preload_async,
+    set_decode_options,
+    set_engine,
+    set_model_name,
+    transcribe,
+    transcribe_detailed,
+)
 from .tray import TrayController
 
 log = logging.getLogger("imla")
 
-# imla/main.py -> project root (so ``python -m imla.main`` resolves
-# even when the package isn't installed into the interpreter).
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Project root (or the exe's folder when packaged).
+_PROJECT_ROOT = launcher.project_root()
 
 
 # ---------------------------------------------------------------------------
@@ -140,11 +160,8 @@ def cmd_list_devices() -> int:
 
 
 def _setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    # Console (when there is one) + rotating file at ~/.config/imla/imla.log.
+    applog.setup_logging()
 
 
 def _select_input_device() -> None:
@@ -175,8 +192,19 @@ def apply_config(
 ) -> None:
     """Push config values into the live components (no restart)."""
     # Whisper model
-    model = cfg.get("transcription", {}).get("model", "base")
-    set_model_name(model)
+    tcfg = cfg.get("transcription", {})
+    set_engine(
+        tcfg.get("engine", "auto"),
+        tcfg.get("cloud_model", "whisper-large-v3-turbo"),
+    )
+    set_model_name(tcfg.get("model", "small.en"))
+    set_decode_options(
+        beam_size=tcfg.get("beam_size", 3),
+        cpu_threads=tcfg.get("cpu_threads", 0),
+    )
+    # Load the model now (no-op if already loaded) so the next dictation
+    # doesn't pay the load/download cost.
+    preload_async()
 
     # Microphone lock
     dev = cfg.get("input_device")
@@ -234,12 +262,18 @@ def _run_finalize(
         log.info("Transcribing with Whisper...")
         t_w0 = time.monotonic()
         try:
-            raw = transcribe(audio)
+            stt = transcribe_detailed(
+                audio, vocab=get_vocabulary(config), api_key=api_key
+            )
         except Exception:  # noqa: BLE001
             log.exception("Transcription failed.")
             return
+        raw = stt.text
         t_w1 = time.monotonic()
         whisper_s = t_w1 - t_w0
+        stt_label = stt.engine
+        if stt.fallback_reason:
+            stt_label += f", fallback: {stt.fallback_reason}"
 
         if not raw:
             log.info("(empty transcript)")
@@ -254,10 +288,15 @@ def _run_finalize(
             result = clean_transcript(
                 raw,
                 groq_api_key=api_key,
-                groq_model=fmt_cfg.get("groq_model", "llama-3.3-70b-versatile"),
+                groq_model=fmt_cfg.get("groq_model", "openai/gpt-oss-20b"),
                 ollama_model=fmt_cfg.get("ollama_model", "llama3.2:3b"),
                 tier_override=fmt_cfg.get("tier", "auto"),
                 dictionary=get_dictionary(config),
+                vocabulary=get_vocabulary(config),
+                fix_grammar=bool(fmt_cfg.get("fix_grammar", True)),
+                # The short-utterance LLM bypass saves quota but can't fix
+                # grammar, so only use it when grammar fixing is off.
+                skip_llm_for_short=not bool(fmt_cfg.get("fix_grammar", True)),
             )
         except Exception:  # noqa: BLE001
             log.exception("Formatting pipeline failed; injecting raw transcript.")
@@ -270,6 +309,14 @@ def _run_finalize(
                 "Cleaned (%s, %d → %d words): %r",
                 tier_label, result.word_count_in, result.word_count_out, cleaned,
             )
+            # Diagnostics: which raw words are absent from the output?
+            out_words = {w.strip(".,!?;:\"'()").lower() for w in cleaned.split()}
+            dropped = [
+                w for w in raw.split()
+                if w.strip(".,!?;:\"'()").lower() not in out_words
+            ]
+            if dropped:
+                log.info("Words not present in cleaned text: %s", " ".join(dropped))
         t_f1 = time.monotonic()
         format_s = t_f1 - t_f0
 
@@ -296,8 +343,9 @@ def _run_finalize(
 
         total_s = t_f1 - release_ts
         log.info(
-            "[AUDIO] %.2fs | [WHISPER] %.2fs | [FORMAT] %.2fs (%s) | Total: %.2fs",
+            "[AUDIO] %.2fs | [STT:%s] %.2fs | [FORMAT] %.2fs (%s) | Total: %.2fs",
             audio_duration_s,
+            stt_label,
             whisper_s,
             format_s,
             tier_label,
@@ -384,6 +432,17 @@ def main(argv: Optional[list] = None) -> int:
     config_path = args.config or str(CONFIG_PATH)
     config_path_obj = Path(config_path)
     config = load_config(path=config_path_obj)
+
+    # Only one dictation process may own the hotkey. The Settings window is a
+    # separate process and is allowed alongside it.
+    if not args.settings and not single_instance.acquire("imla"):
+        log.info("Imla is already running; exiting this second instance.")
+        return 0
+
+    # Copy a .env key into the OS keychain so the app also works when it is
+    # not started from the project folder (desktop shortcut, start on login).
+    if import_env_key_if_missing():
+        log.info("Imported the Groq API key from .env into the OS keychain.")
     api_key = get_api_key()
 
     # CLI --device overrides config
@@ -411,6 +470,20 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     log.info("Imla starting up…")
+    tcfg = config.get("transcription", {})
+    log.info(
+        "Speech engine: %s | cloud model: %s | local model: faster-whisper %s "
+        "(cpu, int8, beam %s)",
+        tcfg.get("engine", "auto"),
+        tcfg.get("cloud_model", "whisper-large-v3-turbo"),
+        tcfg.get("model", "small.en"), tcfg.get("beam_size", 3),
+    )
+    log.info("Log file: %s", applog.LOG_PATH)
+    log_format_setup(
+        config.get("format", {}),
+        has_groq_key=bool(get_api_key()),
+        vocabulary=get_vocabulary(config),
+    )
 
     if not is_trusted(prompt=True):
         log.warning(
@@ -475,6 +548,11 @@ def main(argv: Optional[list] = None) -> int:
 
     def on_release() -> None:
         nonlocal transcribe_thread
+        # Keep capturing briefly so the last syllable isn't clipped when the
+        # key is released a hair early. Done outside the lock.
+        tail_s = max(0, int(config.get("tail_ms", 250) or 0)) / 1000.0
+        if tail_s and recorder.start_time and not app.muted:
+            time.sleep(min(tail_s, 1.0))
         with state_lock:
             recorder.set_preview_sink(None)
             recorder.set_silence_callback(None)
@@ -552,7 +630,8 @@ def main(argv: Optional[list] = None) -> int:
         if settings_proc is not None and settings_proc.poll() is None:
             log.info("Settings window is already open.")
             return
-        cmd = [sys.executable, "-m", "imla.main", "--settings"]
+        # pythonw.exe on Windows (no console window); the exe itself when packaged.
+        cmd = launcher.launch_command("--settings")
         if args.config:
             cmd += ["--config", args.config]
         settings_proc = subprocess.Popen(cmd, cwd=str(_PROJECT_ROOT))
@@ -621,6 +700,12 @@ def main(argv: Optional[list] = None) -> int:
     log.info(
         "Ready. Hold %s to record. Ctrl+C to quit.",
         str(ptt.key_spec).replace("Key.", ""),
+    )
+    # Visible feedback for shortcut launches (no console to look at).
+    tray.notify(
+        "Imla is ready",
+        "Hold %s and speak. Right-click the tray icon for Settings or Quit."
+        % str(ptt.key_spec).replace("Key.", "").replace("_", " ").title(),
     )
 
     try:

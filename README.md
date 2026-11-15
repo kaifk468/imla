@@ -6,6 +6,48 @@ Hold **Right Option / Right Alt** to speak, and release to automatically transcr
 
 ---
 
+## Quick Start: One-Click App (run the installer once)
+
+Do this **one time** per computer. After it, Imla is searchable like any other app, you never need a terminal or the project folder path again, and you can start, open Settings and quit with the mouse.
+
+**0. Prerequisite (once):** install `uv` and create the environment from the project folder (see the platform sections below for the `uv` install command and Linux/macOS system packages):
+
+```bash
+uv sync --python 3.12
+```
+
+**1. Create your launchers (once):**
+
+| Platform | Command (run from the project folder) | What you get |
+| :--- | :--- | :--- |
+| **Windows 10/11** | `powershell -ExecutionPolicy Bypass -File scripts\install_windows.ps1` | **Imla** and **Imla Settings** on the Desktop and in the Start Menu. Add `-StartOnLogin` to launch at sign-in. |
+| **Ubuntu / Linux** | `bash scripts/install_linux.sh` | **Imla** and **Imla Settings** in the app menu and on the Desktop. Add `--start-on-login` to launch at login. |
+| **macOS** | `bash scripts/install_macos.sh` | `Imla.app` and `Imla Settings.app` in `~/Applications` (Spotlight, Launchpad, Dock). Add `--start-on-login` to launch at login. |
+
+Uninstall: `scripts\uninstall_windows.ps1`, or `bash scripts/install_linux.sh --uninstall`, or `bash scripts/install_macos.sh --uninstall`.
+
+**2. Start (one click):**
+- **Windows**: press the Windows key, type `Imla`, press Enter (or double-click the Desktop icon).
+- **Ubuntu**: press Super, type `Imla`, press Enter.
+- **macOS**: press Cmd+Space, type `Imla`, press Enter. Drag it to the Dock to pin it.
+
+A notification **"Imla is ready"** appears after a few seconds and an icon shows in the system tray / menu bar. Hold **Right Alt / Right Option**, speak, release.
+
+**3. Open Settings (one click):**
+- Search for **Imla Settings** the same way, **or** right-click the tray icon and choose **Settings…**.
+- Close the Settings window with the **X** (it asks if there are unsaved changes). This does *not* stop Imla.
+
+**4. Quit (one click):** right-click the Imla tray icon (on Windows it may be under the **^** arrow) and choose **Quit**. Starting Imla twice is safe: the second copy exits and the first keeps running.
+
+**Notes**
+- The launchers point at this project folder and its `.venv`; do not move or delete the folder (re-run the installer if you do).
+- **Ubuntu must use an X11 session** ("Ubuntu on Xorg", gear icon at the login screen). Wayland blocks the global hotkey and pasting into other apps unless you follow the Wayland setup below.
+- **macOS** asks for Microphone, Accessibility and Input Monitoring permissions on first run (see the macOS section). If it says the app is from an unidentified developer, right-click it and choose **Open** once.
+- The Windows installer has been run on Windows; the Linux and macOS installers were written to match it but have only been syntax-checked so far. Please report any problem.
+- Logs are written to `~/.config/imla/imla.log` (Settings → General → **Open log file**).
+
+---
+
 ## Current Status
 
 | Platform | Status | Implementation Details |
@@ -16,11 +58,14 @@ Hold **Right Option / Right Alt** to speak, and release to automatically transcr
 
 ### Core Features
 
-- **Two-Model Speech Pipeline**:
+- **Speech Pipeline with Cloud + Local Fallback**:
   - **Live Provisional Preview (`Vosk`)**: Streams low-latency partial transcripts in the bottom half of the expanded HUD pill while you hold the hotkey (auto-downloaded and cached at `~/.cache/imla/models/vosk-model-small-en-us-0.15`).
-  - **Final Transcription (`faster-whisper`)**: Runs locally on CPU (`int8`, `vad_filter=False` so quiet or wireless mics are never clipped). Supports live switching between `tiny`, `base`, `small`, and `medium` models.
+  - **Final Transcription, engine `auto` (default)**: sends the recording to **Groq cloud Whisper (`whisper-large-v3-turbo`)** (about 0.5–1 s) and automatically **falls back to local `faster-whisper`** (CPU, `int8`) if there is no key, no network, a timeout or a rate limit. After repeated cloud failures the cloud is skipped for a few minutes so an outage adds no delay. Choose **Local only** in Settings → Transcription if you do not want audio to leave your computer. In `auto`/`cloud` mode your recorded audio and transcript text are sent to Groq.
+  - **Technical vocabulary**: terms from Settings → **Vocabulary** and your dictionary are passed to Whisper and the cleanup model so words like `PyTorch`, `Kubernetes`, `gRPC` come out right.
+- **Grammar fixing** (Settings → Cleanup → *Fix grammar mistakes*): the cleanup model corrects grammar and tense while a retention guard prevents it from dropping or rewriting your words.
+- **Free-tier protection**: cleanup rotates `openai/gpt-oss-20b` → `gpt-oss-120b` → `qwen/qwen3.8-27b` on rate limits, and **Settings → Cleanup → Usage today** shows tokens and audio seconds used against the daily Groq limits.
 - **3-Tier Transcript Cleanup**:
-  - **Tier 1 — Groq Cloud (`llama-3.3-70b-versatile` by default)**: Ultra-fast punctuation, capitalization, and filler-word cleanup with a strict `1.5x` word-count hallucination guard.
+  - **Tier 1 — Groq Cloud (`openai/gpt-oss-20b` by default; pick any model in Settings with *Refresh*)**: Ultra-fast punctuation, capitalization, grammar and filler-word cleanup with a word-count hallucination guard.
   - **Tier 2 — Local Ollama (`llama3.2:3b` at `http://localhost:11434`)**: Automatic local LLM fallback if offline or if no Groq key is configured.
   - **Tier 3 — Deterministic Rule Engine**: Instant zero-dependency offline fallback that strips filler words (`um`, `uh`, `like`, `you know`), maps spoken punctuation (`comma`, `period`, `question mark`, `open/close quote`), and fixes sentence casing.
 - **Personal Dictionary**: Case-insensitive, word-boundary-safe replacements applied after cleanup (e.g., `"pie torch" → "PyTorch"`, `"kubernetes" → "K8s"`).
@@ -29,7 +74,7 @@ Hold **Right Option / Right Alt** to speak, and release to automatically transcr
   - **Dead Wireless Dongle / Silence Detection**: Detects 1.5 seconds of continuous 100% digital silence (`peak < 1e-6`) or PortAudio disconnect errors, reinitializes PortAudio, and automatically switches to a built-in fallback microphone.
 - **System Tray & Settings Dashboard**:
   - Menu bar / system tray icon (`🎙` / `🔇`) with live status, **Quick Mute**, **Settings…**, and **Quit**.
-  - Multi-tab Tkinter Settings Dashboard (`General`, `Transcription`, `Cleanup`, `Dictionary`) launched in an isolated child process with dirty-state tracking, close guard, live hot-reload, and OS Keychain storage (`keyring`).
+  - Multi-tab Tkinter Settings Dashboard (`General`, `Transcription`, `Cleanup`, `Dictionary`, `Vocabulary`) with engine/model pickers, **Test cloud**, usage meters and log shortcuts, launched in an isolated child process with dirty-state tracking, close guard, live hot-reload, and OS Keychain storage (`keyring`).
 
 ---
 
@@ -171,7 +216,7 @@ Imla never writes your API key to `config.json`. It resolves `GROQ_API_KEY` in t
    ```
 
 ### Config File (`~/.config/imla/config.json`)
-Settings are persisted atomically to `~/.config/imla/config.json` across all platforms:
+You normally never edit this by hand; use the Settings window. On first run the Groq key from `.env` is copied into the OS keychain, so the one-click launchers work from any folder. Settings are persisted atomically to `~/.config/imla/config.json` across all platforms (`engine` is `auto`, `cloud` or `local`; `model` is the local fallback):
 ```json
 {
   "hotkey": "Key.alt_r",
@@ -179,15 +224,22 @@ Settings are persisted atomically to `~/.config/imla/config.json` across all pla
   "input_device": null,
   "overlay_enabled": true,
   "start_on_login": false,
+  "tail_ms": 250,
   "transcription": {
-    "model": "base",
+    "engine": "auto",
+    "cloud_model": "whisper-large-v3-turbo",
+    "model": "small.en",
+    "beam_size": 3,
+    "cpu_threads": 0,
     "preview_enabled": true
   },
   "format": {
     "tier": "auto",
-    "groq_model": "llama-3.3-70b-versatile",
-    "ollama_model": "llama3.2:3b"
+    "groq_model": "openai/gpt-oss-20b",
+    "ollama_model": "llama3.2:3b",
+    "fix_grammar": true
   },
+  "vocabulary": ["PyTorch", "Kubernetes"],
   "dictionary": [
     ["kubernetes", "K8S"],
     ["pie torch", "PyTorch"],
@@ -206,8 +258,11 @@ Settings are persisted atomically to `~/.config/imla/config.json` across all pla
 ## Running Tests
 
 ```bash
-# Run the full unit test suite (19 tests)
+# Run the full unit test suite (103 tests; test_provisional_text_truncation is a known pre-existing failure)
 uv run python -m unittest discover -s tests -v
+
+# Benchmark local vs cloud transcription on your own clips or microphone
+uv run python tests/bench_stt.py --engine both --record 8
 
 # Run the 3-tier formatting & length-guard smoke test
 uv run python tests/format_smoke.py
@@ -234,3 +289,6 @@ uv run python tests/hud_smoke.py
 - `imla/keychain.py` — OS keychain wrapper (`keyring` + `.env` fallback) and Groq API connection tester.
 - `imla/startup.py` — Launch-on-login manager (`LaunchAgent` plist on macOS, `Run` registry key on Windows, XDG `.desktop` entry on Linux).
 - `imla/config.py` — Atomic config loader/saver with key-stripping defence-in-depth.
+- `imla/usage.py` — Daily token / audio-second counters for the Groq free tier.
+- `imla/launcher.py`, `imla/single_instance.py`, `imla/applog.py` — Relaunch command for the Settings process, one-copy-at-a-time guard, and rotating log file.
+- `scripts/install_windows.ps1`, `install_linux.sh`, `install_macos.sh` — One-time installers that make Imla searchable and pin-able (see Quick Start).

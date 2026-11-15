@@ -1,6 +1,6 @@
 """3-tier transcript cleanup pipeline for Imla.
 
-Tier 1 — Groq cloud (``llama-3.3-70b-versatile`` by default). Target <200 ms,
+Tier 1 — Groq cloud (``openai/gpt-oss-20b`` by default). Target <200 ms,
         hard 1.5 s timeout.
 Tier 2 — Ollama local (``llama3.2:3b`` at http://localhost:11434).
         Fallback if Tier 1 fails or times out.
@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Iterable, Optional, Tuple
 
@@ -38,7 +39,21 @@ log = logging.getLogger("imla.format")
 # ---------------------------------------------------------------------------
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# llama-3.3-70b-versatile is no longer offered to all Groq keys (404);
+# gpt-oss-20b is fast and available.
+DEFAULT_GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+# Models that returned 404 this session — never retried.
+_UNAVAILABLE_GROQ_MODELS: set = set()
+# Tried (after the configured/default model) when a model is rate-limited.
+GROQ_FALLBACK_MODELS = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+]
+# model -> epoch seconds until which it is skipped (429 handling).
+_RATE_LIMITED_UNTIL: dict = {}
+GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
+_NON_CHAT_MARKERS = ("whisper", "orpheus", "prompt-guard", "safeguard", "tts")
 GROQ_TIMEOUT_S = float(os.environ.get("GROQ_TIMEOUT_S", "3.0"))
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -64,22 +79,25 @@ You must NEVER:
 
 Rules:
 1. Preserve the speaker's final intended meaning.
-2. Resolve speech repairs and self-corrections: If the speaker changes their mind, \
-corrects themselves, or backtracks (e.g. using 'no', 'actually', 'wait', 'scratch that', \
-'I mean', or by restating an updated detail, date, time, or name), remove the retracted clause \
-and keep only the final intended version.
+2. Resolve speech repairs and self-corrections: only when the speaker clearly \
+retracts something (e.g. "scratch that", "no wait", "I mean" followed by a \
+replacement, or restating an updated detail, date, time, or name), remove the \
+retracted clause and keep only the final intended version. If unsure, KEEP the words.
 3. If the speaker says "write an email to Sarah" or "what's the weather" \
 or "summarise this in two sentences" or any other command/question, the \
 cleaned output must be the LITERAL TEXT of that command/question — \
 NOT an answer to it.
-4. Remove filler words: "um", "uh", "er", "ah", "you know", "I mean", \
-"basically", "sort of", "kind of", "literally" (when used as filler).
+4. Remove ONLY pure filler sounds and stutters: "um", "uh", "er", "ah", and \
+accidental word repeats ("the the"). Keep words like "like", "actually", \
+"basically", "literally", "you know" when they carry meaning.
 5. Map spoken punctuation to symbols: "comma" -> ",", "period" -> ".", \
 "question mark" -> "?", "exclamation mark" -> "!", \
 "new paragraph" -> blank line, "new line" -> newline.
 6. Capitalize the first letter of each sentence.
-7. Preserve proper nouns, technical terms, and unusual phrasing.
-
+7. NEVER delete, replace or paraphrase content words, technical terms, product \
+names, code identifiers, acronyms or numbers. Use their standard spelling and \
+casing (e.g. PyTorch, Kubernetes, GitHub, gRPC, JSON, API).
+{grammar_rule}
 Few-shot examples:
 - Input: "Hi let's meet on Wednesday period No let's meet on Friday at 5:00 p.m. period No let's meet on Monday at 2:00 p.m. period"
   Output: Hi, let's meet on Monday at 2:00 p.m.
@@ -92,12 +110,56 @@ Few-shot examples:
 - Input: "summarise this in two sentences"
   Output: Summarise this in two sentences.
 - Input: "um so I was thinking like maybe we should uh you know try the new approach"
-  Output: So I was thinking, maybe we should try the new approach.
+  Output: So I was thinking, like, maybe we should try the new approach.
 - Input: "send a message to John comma tell him the meeting is at three period"
   Output: Send a message to John, tell him the meeting is at three.
-
+- Input: "deploy the pie torch model to kubernetes using grpc"
+  Output: Deploy the PyTorch model to Kubernetes using gRPC.
+{grammar_examples}{vocab_block}
 Return ONLY the cleaned transcript. No preamble, no labels, no commentary, \
 no explanation."""
+
+_GRAMMAR_RULE = """\
+8. Fix grammatical mistakes with the SMALLEST possible edit: subject-verb \
+agreement, verb tense, articles, prepositions, plurals and word order. Do not \
+rewrite style, do not change meaning, do not add or remove content words.
+"""
+
+_GRAMMAR_EXAMPLES = """\
+- Input: "he go to the store yesterday and buy a apple"
+  Output: He went to the store yesterday and bought an apple.
+- Input: "the build don't pass because the tests is failing"
+  Output: The build doesn't pass because the tests are failing.
+"""
+
+
+def build_system_prompt(
+    vocabulary: Optional[Iterable[str]] = None,
+    fix_grammar: bool = True,
+) -> str:
+    """Assemble the cleanup system prompt.
+
+    ``vocabulary`` terms are listed as spellings to preserve. ``fix_grammar``
+    toggles the minimal-edit grammar rule and its examples."""
+    terms = []
+    seen = set()
+    for t in vocabulary or []:
+        t = (t or "").strip()
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            terms.append(t)
+    vocab_block = ""
+    if terms:
+        vocab_block = (
+            "\nPreserve these exact spellings whenever the speaker says them: "
+            + ", ".join(terms[:80])
+            + ".\n"
+        )
+    return SYSTEM_PROMPT.format(
+        grammar_rule=_GRAMMAR_RULE if fix_grammar else "",
+        grammar_examples=_GRAMMAR_EXAMPLES if fix_grammar else "",
+        vocab_block=vocab_block,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +177,42 @@ class FormatResult:
 
 
 # ---------------------------------------------------------------------------
+# Startup diagnostics
+# ---------------------------------------------------------------------------
+
+
+def log_format_setup(
+    fmt_cfg: Optional[dict] = None,
+    has_groq_key: bool = False,
+    vocabulary: Optional[Iterable[str]] = None,
+) -> None:
+    """Log which cleanup models are active and the prompt they receive."""
+    fmt_cfg = fmt_cfg or {}
+    groq_model = fmt_cfg.get("groq_model", DEFAULT_GROQ_MODEL)
+    ollama_model = fmt_cfg.get("ollama_model", DEFAULT_OLLAMA_MODEL)
+    tier = fmt_cfg.get("tier", "auto")
+    log.info(
+        "Grammar/cleanup models — tier mode: %s | Tier 1 Groq: %s (%s) | "
+        "Tier 2 Ollama: %s | Tier 3: regex rules",
+        tier,
+        groq_model,
+        "API key found" if has_groq_key else "NO API KEY, will be skipped",
+        ollama_model,
+    )
+    chain = [groq_model, os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
+             DEFAULT_GROQ_MODEL, *GROQ_FALLBACK_MODELS]
+    seen_m: set = set()
+    chain = [m for m in chain if m and not (m in seen_m or seen_m.add(m))]
+    log.info("Groq model fallback chain (on 429/5xx): %s", " -> ".join(chain))
+    fix_grammar = bool(fmt_cfg.get("fix_grammar", True))
+    log.info("Grammar correction: %s", "ON" if fix_grammar else "OFF")
+    log.info(
+        "Cleanup system prompt:\n%s",
+        build_system_prompt(vocabulary, fix_grammar),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -127,6 +225,9 @@ def clean_transcript(
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     tier_override: Optional[str] = None,
     dictionary: Optional[Iterable[Tuple[str, str]]] = None,
+    vocabulary: Optional[Iterable[str]] = None,
+    fix_grammar: bool = True,
+    skip_llm_for_short: bool = True,
 ) -> FormatResult:
     """Clean a raw transcript using the 3-tier failover pipeline.
 
@@ -138,21 +239,36 @@ def clean_transcript(
         tier_override: one of ``"groq" | "ollama" | "rule"`` to force
             a specific tier (skips failover). ``None`` = 3-tier failover.
         dictionary: iterable of ``(find, replace)`` tuples applied
-            after the chosen tier.
+            before the LLM (so it sees correct terms) and again after.
+        vocabulary: technical terms the LLM must spell exactly.
+        fix_grammar: ask the LLM tiers for minimal-edit grammar fixes.
+            (The regex tier cannot fix grammar.)
+        skip_llm_for_short: in auto mode, skip the LLM for short (<= 6 words)
+            transcripts with no filler/correction/spoken punctuation, to
+            save API quota.
     """
+    compiled = None
+    if dictionary:
+        from .dictionary import compile_dictionary, apply_dictionary
+        compiled = compile_dictionary(dictionary)
+        # Pre-pass: the LLM should see "PyTorch", not "pie torch".
+        raw = apply_dictionary(raw, compiled)
+
     raw_words = _word_count(raw)
+    system_prompt = build_system_prompt(vocabulary, fix_grammar)
     tier_used, text, latency_s = _run_tier(
         raw,
         groq_api_key=groq_api_key,
         groq_model=groq_model,
         ollama_model=ollama_model,
         tier_override=tier_override,
+        system_prompt=system_prompt,
+        skip_llm_for_short=skip_llm_for_short,
     )
 
-    # Apply personal replacement dictionary (post-format).
-    if dictionary:
-        from .dictionary import compile_dictionary, apply_dictionary
-        compiled = compile_dictionary(dictionary)
+    # Apply personal replacement dictionary again (post-format).
+    if compiled:
+        from .dictionary import apply_dictionary
         text = apply_dictionary(text, compiled)
 
     log.info(
@@ -175,8 +291,11 @@ def _run_tier(
     groq_model: str,
     ollama_model: str,
     tier_override: Optional[str],
+    system_prompt: Optional[str] = None,
+    skip_llm_for_short: bool = True,
 ) -> Tuple[str, str, float]:
     """Run the cleanup pipeline, returning ``(tier, text, latency)``."""
+    system_prompt = system_prompt or build_system_prompt()
 
     def try_tier(name: str, fn) -> Optional[Tuple[str, str, float]]:
         t0 = time.monotonic()
@@ -192,21 +311,36 @@ def _run_tier(
                 name, _word_count(raw), _word_count(text),
             )
             return None
+        if not _retention_ok(raw, text):
+            log.warning(
+                "Tier %s dropped too many words (%d → %d); falling back.",
+                name, _word_count(raw), _word_count(text),
+            )
+            return None
         return name, text, latency
 
     # Forced tier
     if tier_override == "groq":
         result = try_tier(
             "groq",
-            lambda: _call_groq(raw, groq_api_key or "", groq_model),
+            lambda: _call_groq(raw, groq_api_key or "", groq_model, system_prompt),
         )
         if result:
             return result
     elif tier_override == "ollama":
-        result = try_tier("ollama", lambda: _call_ollama(raw, ollama_model))
+        result = try_tier(
+            "ollama", lambda: _call_ollama(raw, ollama_model, system_prompt)
+        )
         if result:
             return result
     elif tier_override == "rule":
+        t0 = time.monotonic()
+        text = _rule_cleanup(raw)
+        return "rule", text, time.monotonic() - t0
+
+    # Auto: short, already-clean transcripts don't need the LLM.
+    if skip_llm_for_short and _is_short_and_clean(raw):
+        log.info("Short clean transcript; skipping LLM to save quota.")
         t0 = time.monotonic()
         text = _rule_cleanup(raw)
         return "rule", text, time.monotonic() - t0
@@ -221,13 +355,17 @@ def _run_tier(
             pass
 
     if api_key:
-        result = try_tier("groq", lambda: _call_groq(raw, api_key, groq_model))
+        result = try_tier(
+            "groq", lambda: _call_groq(raw, api_key, groq_model, system_prompt)
+        )
         if result:
             return result
     else:
         log.debug("GROQ_API_KEY not set; skipping Tier 1.")
 
-    result = try_tier("ollama", lambda: _call_ollama(raw, ollama_model))
+    result = try_tier(
+        "ollama", lambda: _call_ollama(raw, ollama_model, system_prompt)
+    )
     if result:
         return result
 
@@ -256,25 +394,134 @@ def _length_ok(raw: str, cleaned: str) -> bool:
     return cleaned_words <= max(raw_words + 3, int(LENGTH_GUARD_RATIO * raw_words))
 
 
-def _call_groq(raw: str, api_key: str, model: str = DEFAULT_GROQ_MODEL) -> str:
+_RETENTION_MIN_RATIO = 0.7
+_RETENTION_MIN_WORDS = 6
+# Words that legitimately disappear (fillers, spoken punctuation).
+_NON_CONTENT = {
+    "um", "umm", "uh", "uhh", "er", "ah", "hmm",
+    "comma", "period", "colon", "semicolon", "exclamation", "mark", "point",
+    "question", "new", "line", "paragraph", "open", "close", "quote",
+}
+# If any of these appear the speaker may have retracted a clause, so a big
+# drop in word count is expected and the guard stands down.
+_CORRECTION_MARKERS = {"wait", "scratch", "sorry", "rather", "actually", "no"}
+_WORD_RE = re.compile(r"[a-z0-9]+(?:['’][a-z]+)?")
+
+
+_SHORT_MAX_WORDS = 6
+_BYPASS_BLOCK_WORDS = (
+    {"um", "umm", "uh", "uhh", "er", "ah", "hmm", "comma", "period", "colon",
+     "semicolon", "exclamation", "paragraph", "stutter"}
+    | _CORRECTION_MARKERS
+)
+_BYPASS_BLOCK_PHRASES = re.compile(
+    r"\b(?:question mark|new line|new paragraph|open quote|close quote|"
+    r"you know|i mean)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_short_and_clean(raw: str) -> bool:
+    """True if ``raw`` is short with no filler/correction/spoken punctuation."""
+    if _word_count(raw) == 0 or _word_count(raw) > _SHORT_MAX_WORDS:
+        return False
+    words = _WORD_RE.findall(raw.lower())
+    if _BYPASS_BLOCK_WORDS.intersection(words):
+        return False
+    if _BYPASS_BLOCK_PHRASES.search(raw):
+        return False
+    # Accidental repeats ("the the") need cleanup.
+    return all(a != b for a, b in zip(words, words[1:]))
+
+
+def _content_words(s: str) -> list:
+    return [
+        w for w in _WORD_RE.findall(s.lower()) if w not in _NON_CONTENT
+    ]
+
+
+def _retention_ok(raw: str, cleaned: str) -> bool:
+    """Reject output that silently dropped a large share of the input.
+
+    Complements :func:`_length_ok`, which only catches output that is too
+    long. Skipped for short inputs and when the speaker used a
+    self-correction marker (where dropping words is correct)."""
+    raw_words = _content_words(raw)
+    if len(raw_words) < _RETENTION_MIN_WORDS:
+        return True
+    if _CORRECTION_MARKERS.intersection(raw_words):
+        return True
+    cleaned_set = set(_content_words(cleaned))
+    kept = sum(1 for w in raw_words if w in cleaned_set)
+    return kept / len(raw_words) >= _RETENTION_MIN_RATIO
+
+
+def _next_utc_midnight() -> float:
+    now = datetime.now(timezone.utc)
+    nxt = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return nxt.timestamp()
+
+
+def _rate_limit_until(response) -> Tuple[float, str]:
+    """Return ``(epoch_until, reason)`` for a 429 response."""
+    body = ""
+    try:
+        body = response.text or ""
+    except Exception:  # noqa: BLE001
+        pass
+    low = body.lower()
+    if "per day" in low or "tpd" in low or "rpd" in low:
+        return _next_utc_midnight(), "daily limit"
+    retry = 60.0
+    try:
+        hdr = response.headers.get("retry-after")
+        if hdr is not None:
+            retry = max(1.0, float(hdr))
+    except Exception:  # noqa: BLE001
+        retry = 60.0
+    return time.time() + retry, f"{retry:.0f}s"
+
+
+def _call_groq(
+    raw: str,
+    api_key: str,
+    model: str = DEFAULT_GROQ_MODEL,
+    system_prompt: Optional[str] = None,
+) -> str:
+    system_prompt = system_prompt or build_system_prompt()
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     candidate_models = [
         model,
-        os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        "openai/gpt-oss-20b",
+        os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
+        DEFAULT_GROQ_MODEL,
+        *GROQ_FALLBACK_MODELS,
     ]
     seen = set()
     models = [m for m in candidate_models if m and not (m in seen or seen.add(m))]
+    # Skip models that already returned 404 this session: retrying a model the
+    # account can't use costs a wasted round trip on every dictation.
+    usable = [m for m in models if m not in _UNAVAILABLE_GROQ_MODELS]
+    models = usable or models
+
+    now = time.time()
+    available = [m for m in models if _RATE_LIMITED_UNTIL.get(m, 0.0) <= now]
+    if not available:
+        raise RuntimeError(
+            "All Groq models are rate-limited: " + ", ".join(models)
+        )
+    models = available
 
     last_err: Optional[Exception] = None
     for m in models:
         payload = {
             "model": m,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Clean this transcript:\n\n{raw}"},
             ],
             "temperature": 0.0,
@@ -290,12 +537,40 @@ def _call_groq(raw: str, api_key: str, model: str = DEFAULT_GROQ_MODEL) -> str:
             data = r.json()
             content = data["choices"][0]["message"].get("content")
             if content and content.strip():
+                try:
+                    tokens = (data.get("usage") or {}).get("total_tokens")
+                    if tokens:
+                        from . import usage
+                        usage.record_tokens(m, int(tokens))
+                    log.info("Groq cleanup used %s (%s tokens)", m, tokens)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("usage recording failed: %s", e)
                 return content.strip()
             log.warning("Groq model %s returned empty content; trying fallback", m)
         except httpx.HTTPStatusError as e:
             last_err = e
-            if e.response.status_code == 404:
-                log.warning("Groq model %s not found (404); trying fallback", m)
+            code = e.response.status_code
+            if code == 404:
+                log.warning(
+                    "Groq model %s not found (404); skipping it for the rest of "
+                    "this session and trying fallback. Pick an available model "
+                    "in Settings → Cleanup to avoid this.", m,
+                )
+                _UNAVAILABLE_GROQ_MODELS.add(m)
+                continue
+            if code == 429:
+                until, why = _rate_limit_until(e.response)
+                _RATE_LIMITED_UNTIL[m] = until
+                log.warning(
+                    "Groq model %s rate-limited (429, %s); skipping it for "
+                    "%.0f s and trying the next model.",
+                    m, why, max(0.0, until - time.time()),
+                )
+                continue
+            if code >= 500:
+                log.warning(
+                    "Groq model %s server error (%d); trying fallback", m, code
+                )
                 continue
             raise
         except Exception as e:
@@ -308,11 +583,50 @@ def _call_groq(raw: str, api_key: str, model: str = DEFAULT_GROQ_MODEL) -> str:
     raise RuntimeError("All Groq models failed to return content")
 
 
-def _call_ollama(raw: str, model: str = DEFAULT_OLLAMA_MODEL) -> str:
+def list_groq_chat_models(
+    api_key: Optional[str] = None, timeout_s: float = 8.0
+) -> list[str]:
+    """Return sorted chat-capable Groq model ids; ``[]`` on any error."""
+    try:
+        key = api_key or os.environ.get("GROQ_API_KEY")
+        if not key:
+            try:
+                from .keychain import get_api_key
+                key = get_api_key()
+            except Exception:  # noqa: BLE001
+                key = None
+        if not key:
+            log.warning("list_groq_chat_models: no Groq API key available")
+            return []
+        with httpx.Client(timeout=timeout_s) as client:
+            r = client.get(
+                GROQ_MODELS_URL, headers={"Authorization": f"Bearer {key}"}
+            )
+            r.raise_for_status()
+        ids = [
+            str(m.get("id", ""))
+            for m in (r.json().get("data") or [])
+            if isinstance(m, dict)
+        ]
+        return sorted(
+            i for i in ids
+            if i and not any(x in i.lower() for x in _NON_CHAT_MARKERS)
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Could not list Groq models: %s", e)
+        return []
+
+
+def _call_ollama(
+    raw: str,
+    model: str = DEFAULT_OLLAMA_MODEL,
+    system_prompt: Optional[str] = None,
+) -> str:
+    system_prompt = system_prompt or build_system_prompt()
     payload = {
         "model": model,
         "prompt": (
-            f"{SYSTEM_PROMPT}\n\n"
+            f"{system_prompt}\n\n"
             f"Clean this transcript:\n\n{raw}\n\nCleaned:"
         ),
         "stream": False,
@@ -337,9 +651,9 @@ _FILLER_MULTI = [
     r"\bkind of\b",
     r"\bbasically\b",
     r"\bliterally\b",
-    r"\bactually\b",
-    r"\blike\b",
 ]
+# NOTE: "actually" and "like" are deliberately NOT stripped — they usually
+# carry meaning ("I like pizza") and a regex cannot tell filler from content.
 
 _PUNCT_MAP = [
     (r"\bnew paragraph\b", "\n\n"),

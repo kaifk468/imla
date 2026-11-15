@@ -29,23 +29,46 @@ def default_config() -> Dict[str, Any]:
     return {
         "hotkey": "Key.alt_r",
         "pre_roll_ms": 0,
+        "tail_ms": 250,              # keep recording briefly after key release
         "input_device": None,        # None = auto; else int index or name substring
         "overlay_enabled": True,
         "start_on_login": False,
         "transcription": {
-            "model": "base",         # tiny | base | small | medium
+            # auto = Groq cloud Whisper first, local faster-whisper fallback
+            # cloud = cloud only | local = never send audio off the machine
+            "engine": "auto",
+            "cloud_model": "whisper-large-v3-turbo",
+            # Local (fallback) model:
+            # tiny | base | small | small.en | medium | distil-large-v3 ...
+            "model": "small.en",
             "preview_enabled": True,
+            "beam_size": 3,          # 1 = greedy (fast, least accurate)
+            "cpu_threads": 0,        # 0 = auto
         },
         "format": {
             "tier": "auto",          # auto | groq | ollama | rule
-            "groq_model": "llama-3.3-70b-versatile",
+            "groq_model": "openai/gpt-oss-20b",
             "ollama_model": "llama3.2:3b",
+            "fix_grammar": True,     # minimal-edit grammar correction (LLM tiers)
         },
+        # Terms that need correct spelling but no find/replace pair. They are
+        # fed to Whisper and to the cleanup LLM as spelling hints.
+        "vocabulary": [],
         "dictionary": [
-            ["kubernetes", "K8s"],
+            ["kubernetes", "Kubernetes"],
             ["pie torch", "PyTorch"],
+            ["pie test", "pytest"],
             ["next js", "Next.js"],
+            ["node js", "Node.js"],
+            ["react js", "React"],
             ["grpc", "gRPC"],
+            ["g rpc", "gRPC"],
+            ["get hub", "GitHub"],
+            ["o auth", "OAuth"],
+            ["docker compose", "Docker Compose"],
+            ["type script", "TypeScript"],
+            ["java script", "JavaScript"],
+            ["postgres sql", "PostgreSQL"],
         ],
         "stats": {
             "total_dictations": 0,
@@ -101,6 +124,21 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> None:
             _deep_merge(base[k], v)
         else:
             base[k] = copy.deepcopy(v)
+
+
+def get_vocabulary(cfg: Dict[str, Any]) -> List[str]:
+    """Return spelling-hint terms: the ``vocabulary`` list plus every
+    dictionary replacement target (e.g. ``PyTorch``). De-duplicated, in order."""
+    terms: List[str] = []
+    seen = set()
+    candidates = [t for t in cfg.get("vocabulary", []) if isinstance(t, str)]
+    candidates += [replace for _, replace in get_dictionary(cfg)]
+    for term in candidates:
+        term = term.strip()
+        if term and term.lower() not in seen:
+            seen.add(term.lower())
+            terms.append(term)
+    return terms
 
 
 def get_dictionary(cfg: Dict[str, Any]) -> List[Tuple[str, str]]:

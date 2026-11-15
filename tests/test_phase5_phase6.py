@@ -231,13 +231,13 @@ class TestPhase6SettingsAndStartup(unittest.TestCase):
             self.assertEqual(str(win._save_btn["state"]), "disabled")
 
             # Changing whisper model marks dirty
-            win._whisper_model_var.set("small")
+            win._whisper_model_var.set("medium")
             win._mark_dirty()
             self.assertTrue(win._dirty)
             self.assertEqual(str(win._save_btn["state"]), "normal")
 
             # Reverting resets dirty
-            win._whisper_model_var.set("base")
+            win._whisper_model_var.set(default_config()["transcription"]["model"])
             win._refresh_dirty()
             self.assertFalse(win._dirty)
             self.assertEqual(str(win._save_btn["state"]), "disabled")
